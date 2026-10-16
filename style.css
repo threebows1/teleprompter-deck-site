@@ -1,0 +1,32 @@
+/* Shared across every app page on apps.mysecondwish.com.
+   Colours match the app's own theme: near-black ground, gold accent. */
+:root {
+  --bg:#070707; --fg:#f7f4ec; --muted:#9a9386; --accent:#e6b84c; --rule:#2a2723;
+}
+* { box-sizing:border-box; }
+body {
+  margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  display:flex; justify-content:center; padding:48px 16px;
+}
+main { max-width:36rem; width:100%; }
+main.center { text-align:center; align-self:center; max-width:32rem; }
+h1 { font-size:1.7rem; font-weight:700; letter-spacing:-.02em; margin:0 0 .3em; }
+h1 .deck { color:var(--accent); }
+h2 { font-size:1.05rem; margin:2em 0 .5em; }
+.tag { color:var(--muted); font-size:.78rem; letter-spacing:.32em; margin:0 0 2.2em; }
+p, li { color:var(--muted); }
+a { color:var(--accent); text-decoration:none; }
+a:hover { text-decoration:underline; }
+.row {
+  display:block; padding:1.15em 0; border-top:1px solid var(--rule);
+  text-decoration:none; color:var(--fg);
+}
+.row:last-of-type { border-bottom:1px solid var(--rule); }
+.row:hover { text-decoration:none; }
+.row strong { display:block; font-size:1.05rem; margin-bottom:.15em; }
+.row span { color:var(--muted); font-size:.9rem; }
+nav { margin:2.4em 0 0; padding-top:1.4em; border-top:1px solid var(--rule); font-size:.9rem; }
+nav a { margin-right:1.2em; }
+footer { margin-top:2.6em; color:var(--muted); font-size:.82rem; }
+code { background:#161412; padding:.1em .4em; border-radius:4px; font-size:.9em; }
