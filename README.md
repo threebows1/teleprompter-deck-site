@@ -1,11 +1,21 @@
-# teleprompter deck — site
+# apps.mysecondwish.com
 
-The public pages for the **Teleprompter Deck** Android app: a landing page and
-the privacy policy that Google Play requires to be reachable at a public URL.
+The public pages for each app, one folder per app. Each folder has a landing
+page plus the privacy policy, terms and support pages that the stores require
+to be reachable at a public URL.
+
+| Folder | App | Pages |
+| --- | --- | --- |
+| `teleprompter/` | Teleprompter Deck (Android) | privacy, terms, support, delete-account |
+| `dimlock/` | DimLock (Android, `com.mysecondwish.blackscreen`) | privacy, terms, support, delete-account |
+| `responsive-lens/` | Responsive Lens (Chrome extension) | privacy, support |
+
+`style.css` is shared. Each app's pages set their own `--accent` colour.
+`app-ads.txt` at the root lists the AdMob publisher ID that DimLock uses.
 
 This repository is public **only** because GitHub Pages needs it to be on the
-free plan. It holds nothing but these two pages — the app's source lives in a
-private repository.
+free plan. It holds nothing but these pages — the apps' source lives in
+private repositories.
 
 ## Do not edit `privacy-policy.html` here
 

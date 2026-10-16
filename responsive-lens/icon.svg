@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Responsive Lens">
+  <title>Responsive Lens</title>
+  <defs><linearGradient id="rl-g" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4c9bf0"/><stop offset=".5" stop-color="#0066cc"/><stop offset="1" stop-color="#0052a8"/></linearGradient><linearGradient id="rl-shine" x1="0" y1="0" x2="0" y2="128" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff" stop-opacity=".22"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>
+  <rect width="128" height="128" rx="30" fill="url(#rl-g)"/>
+  <rect width="128" height="128" rx="30" fill="url(#rl-shine)"/>
+  <rect x="24" y="28" width="80" height="72" rx="11" fill="#fff" fill-opacity=".34"/>
+  <rect x="24" y="44" width="54" height="56" rx="10" fill="#fff" fill-opacity=".66" stroke="url(#rl-g)" stroke-width="5" paint-order="stroke"/>
+  <rect x="24" y="58" width="30" height="42" rx="8" fill="#fff" stroke="url(#rl-g)" stroke-width="5" paint-order="stroke"/>
+</svg>
