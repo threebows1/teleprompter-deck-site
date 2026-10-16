@@ -19,9 +19,11 @@ p, li { color:var(--muted); }
 a { color:var(--accent); text-decoration:none; }
 a:hover { text-decoration:underline; }
 .row {
-  display:block; padding:1.15em 0; border-top:1px solid var(--rule);
+  display:flex; gap:1em; align-items:center;
+  padding:1.15em 0; border-top:1px solid var(--rule);
   text-decoration:none; color:var(--fg);
 }
+.row img { width:46px; height:46px; flex:none; }
 .row:last-of-type { border-bottom:1px solid var(--rule); }
 .row:hover { text-decoration:none; }
 .row strong { display:block; font-size:1.05rem; margin-bottom:.15em; }

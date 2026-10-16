@@ -14,7 +14,7 @@
     display:flex; align-items:center; justify-content:center; padding:48px 16px;
   }
   main { max-width:32rem; text-align:center; }
-  svg { width:132px; height:132px; }
+  .logo { width:min(300px,78%); height:auto; display:block; margin:0 auto 1.4em; }
   h1 { font-size:2rem; font-weight:700; letter-spacing:-.02em; margin:1.1em 0 .2em; }
   h1 .deck { color:var(--accent); }
   .tag { color:var(--muted); font-size:.78rem; letter-spacing:.32em; margin:0 0 1.8em; }
@@ -23,23 +23,14 @@
   a:hover { border-bottom-color:var(--accent); }
   footer { margin-top:3em; padding-top:1.4em; border-top:1px solid var(--rule); color:var(--muted); font-size:.82rem; }
 </style>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 </head>
 <body>
 <main>
-  <!-- Same geometry as the app's mark: 288-unit viewport, see lib/ui/brand.dart -->
-  <svg viewBox="0 0 288 288" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Teleprompter Deck">
-    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="288" height="288">
-      <rect width="288" height="288" fill="#fff"/>
-      <circle cx="198" cy="186" r="49" fill="#000"/>
-    </mask>
-    <g mask="url(#cut)" stroke="#e6b84c" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="56" y="66" width="150" height="112" rx="28" stroke-width="16"/>
-      <path d="M84 102h82M84 128h58" stroke-width="11"/>
-    </g>
-    <circle cx="198" cy="186" r="34" stroke="#e6b84c" stroke-width="16"/>
-    <path d="M187 171l27 15-27 15z" fill="#e6b84c" stroke="#e6b84c" stroke-width="5" stroke-linejoin="round"/>
-  </svg>
-  <h1>teleprompter <span class="deck">deck</span></h1>
+  <!-- The lockup from the brand kit, text already outlined so it needs no font. -->
+  <img class="logo" src="logo.svg" alt="Teleprompter Deck" width="2400" height="800">
   <p class="tag">TAP. READ. ROLL.</p>
   <p>Scroll your script at your pace, record to camera, and never lose your place.</p>
   <p>
