@@ -4,44 +4,294 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Apps · My Second Wish</title>
-<meta name="description" content="Apps by My Second Wish.">
-<link rel="stylesheet" href="/style.css">
+<meta name="description" content="Android apps and Chrome extensions by My Second Wish: Teleprompter Deck, DimLock and Responsive Lens.">
+<meta property="og:title" content="Apps · My Second Wish">
+<meta property="og:description" content="Android apps and Chrome extensions by My Second Wish.">
+<meta property="og:image" content="https://apps.mysecondwish.com/icon-512.png">
+<meta name="theme-color" content="#0a0a10">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<!-- The landing page has its own styles; the app sub-pages keep using /style.css. -->
+<style>
+  :root {
+    --bg: #0a0a10;
+    --surface: #13131b;
+    --surface-2: #1a1a24;
+    --line: #262633;
+    --text: #f4f3f8;
+    --muted: #a3a1b3;
+    --faint: #6e6c80;
+    --gold: #e6b84c;
+    --violet: #8b7bff;
+    --blue: #4da3ff;
+    --radius: 22px;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* Soft colour wash behind the header, one tint per app. */
+  .glow {
+    position: absolute;
+    inset: 0 0 auto;
+    height: 640px;
+    pointer-events: none;
+    background:
+      radial-gradient(420px 300px at 18% 8%, color-mix(in srgb, var(--gold) 22%, transparent), transparent 70%),
+      radial-gradient(460px 320px at 55% 0%, color-mix(in srgb, var(--violet) 26%, transparent), transparent 70%),
+      radial-gradient(420px 300px at 88% 12%, color-mix(in srgb, var(--blue) 22%, transparent), transparent 70%);
+    opacity: .55;
+    mask-image: linear-gradient(#000 40%, transparent);
+  }
+
+  .wrap { position: relative; max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+  header.top { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-weight: 700; letter-spacing: -.01em; }
+  .brand img { width: 30px; height: 30px; }
+  .top a.home { color: var(--muted); text-decoration: none; font-size: .92rem; }
+  .top a.home:hover { color: var(--text); }
+
+  .hero { padding: clamp(48px, 10vw, 110px) 0 clamp(36px, 6vw, 64px); max-width: 720px; }
+  .eyebrow { margin: 0 0 14px; font-size: .78rem; font-weight: 600; letter-spacing: .28em; text-transform: uppercase; color: var(--faint); }
+  h1 { margin: 0; font-size: clamp(2.4rem, 6vw, 4rem); line-height: 1.04; letter-spacing: -.035em; font-weight: 800; }
+  h1 .grad {
+    background: linear-gradient(90deg, var(--gold), var(--violet) 50%, var(--blue));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p { margin: 18px 0 28px; font-size: 1.12rem; color: var(--muted); max-width: 34rem; }
+
+  .jump { display: flex; flex-wrap: wrap; gap: 10px; }
+  .jump a {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 9px 16px; border-radius: 999px;
+    background: var(--surface); border: 1px solid var(--line);
+    color: var(--text); text-decoration: none; font-size: .92rem; font-weight: 600;
+    transition: border-color .2s, transform .2s;
+  }
+  .jump a:hover { border-color: var(--faint); transform: translateY(-1px); }
+  .jump .count { min-width: 22px; padding: 0 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: .78rem; text-align: center; }
+
+  section.group { padding: 28px 0 40px; scroll-margin-top: 16px; }
+  .group__head { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+  .group__icon { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--surface); border: 1px solid var(--line); color: var(--muted); }
+  .group__icon svg { width: 20px; height: 20px; }
+  h2 { margin: 0; font-size: 1.45rem; letter-spacing: -.02em; }
+  .group__head p { margin: 0; color: var(--faint); font-size: .92rem; }
+
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+  /* A card alone in its section spans the row, with the icon beside the text. */
+  .grid > .card:only-child { grid-column: 1 / -1; display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 28px; align-items: start; }
+  .grid > .card:only-child .card__top { display: contents; }
+  .grid > .card:only-child .card__icon { grid-row: 1 / span 5; width: 96px; height: 96px; border-radius: 24px; }
+  .grid > .card:only-child .badges { grid-column: 2; justify-content: flex-start; margin-bottom: 14px; }
+  .grid > .card:only-child .desc { max-width: 44rem; }
+
+  .card {
+    --c: var(--violet);
+    position: relative;
+    display: flex; flex-direction: column;
+    padding: 26px;
+    border-radius: var(--radius);
+    background:
+      radial-gradient(360px 200px at 100% 0%, color-mix(in srgb, var(--c) 16%, transparent), transparent 70%),
+      var(--surface);
+    border: 1px solid var(--line);
+    overflow: hidden;
+    transition: transform .25s, border-color .25s, box-shadow .25s;
+  }
+  .card::before {
+    content: ""; position: absolute; inset: 0 0 auto; height: 3px;
+    background: linear-gradient(90deg, var(--c), transparent);
+  }
+  .card:hover {
+    transform: translateY(-3px);
+    border-color: color-mix(in srgb, var(--c) 45%, var(--line));
+    box-shadow: 0 18px 50px -24px color-mix(in srgb, var(--c) 60%, transparent);
+  }
+  .card--gold { --c: var(--gold); }
+  .card--violet { --c: var(--violet); }
+  .card--blue { --c: var(--blue); }
+
+  .card__top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+  .card__icon {
+    width: 76px; height: 76px; border-radius: 20px; flex: none;
+    display: grid; place-items: center; overflow: hidden;
+    background: color-mix(in srgb, var(--c) 14%, var(--surface-2));
+    box-shadow: 0 10px 30px -12px color-mix(in srgb, var(--c) 70%, transparent);
+  }
+  .card__icon img { width: 100%; height: 100%; object-fit: cover; }
+  .card__icon--pad img { width: 82%; height: 82%; object-fit: contain; }
+
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    font-size: .74rem; font-weight: 600; white-space: nowrap;
+    background: var(--surface-2); color: var(--muted); border: 1px solid var(--line);
+  }
+  .badge--live { color: #2fbf71; border-color: color-mix(in srgb, #2fbf71 35%, var(--line)); }
+  .badge--live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge--soon { color: var(--c); border-color: color-mix(in srgb, var(--c) 40%, var(--line)); }
+
+  .tagline { margin: 0 0 6px; font-size: .74rem; font-weight: 700; letter-spacing: .2em; color: var(--c); }
+  h3 { margin: 0 0 10px; font-size: 1.5rem; letter-spacing: -.02em; line-height: 1.2; }
+  h3 a { color: inherit; text-decoration: none; }
+  /* The title link covers the whole card; the buttons below sit above it. */
+  h3 a::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius); }
+  h3 a:focus-visible { outline: none; }
+  h3 a:focus-visible::after { outline: 2px solid var(--c); outline-offset: -2px; }
+  h3 .accent { color: var(--gold); }
+  .card p.desc { margin: 0 0 24px; color: var(--muted); flex: 1; }
+
+  .actions { position: relative; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 18px; border-radius: 12px;
+    font-weight: 700; font-size: .92rem; text-decoration: none;
+    transition: filter .2s, transform .2s;
+  }
+  .btn svg { width: 16px; height: 16px; }
+  .btn--solid { background: var(--c); color: #0a0a10; }
+  .card--violet .btn--solid, .card--blue .btn--solid { color: #fff; }
+  .btn--solid:hover { filter: brightness(1.1); transform: translateY(-1px); }
+  .links { display: flex; gap: 14px; font-size: .88rem; }
+  .links a { color: var(--faint); text-decoration: none; }
+  .links a:hover { color: var(--c); }
+
+  footer.bottom {
+    margin-top: 40px; padding: 28px 0 44px; border-top: 1px solid var(--line);
+    display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; align-items: center;
+    color: var(--faint); font-size: .9rem;
+  }
+  footer.bottom a { color: var(--muted); text-decoration: none; }
+  footer.bottom a:hover { color: var(--text); }
+
+  :focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
+
+  @media (max-width: 760px) {
+    .grid { grid-template-columns: minmax(0, 1fr); }
+    .grid > .card:only-child { display: flex; }
+    .grid > .card:only-child .card__top { display: flex; }
+    .grid > .card:only-child .card__icon { width: 64px; height: 64px; border-radius: 17px; }
+    .grid > .card:only-child .badges { justify-content: flex-end; margin-bottom: 0; }
+    .card { padding: 22px; }
+    .card__icon { width: 64px; height: 64px; border-radius: 17px; }
+    .group__head p { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; scroll-behavior: auto !important; }
+  }
+</style>
 </head>
 <body>
-<main>
-  <h1>Apps</h1>
-  <p class="tag">MY SECOND WISH</p>
+<div class="glow" aria-hidden="true"></div>
 
-  <a class="row" href="/teleprompter/">
-    <img src="/teleprompter/mark.svg" alt="" width="1000" height="1000">
-    <div>
-      <strong>Teleprompter <span class="deck">Deck</span></strong>
-      <span>Scroll your script at your pace, record to camera, and never lose your place.</span>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="30" height="30">My Second Wish</a>
+    <a class="home" href="https://mysecondwish.com/">mysecondwish.com ↗</a>
+  </header>
+
+  <section class="hero">
+    <p class="eyebrow">Apps &amp; extensions</p>
+    <h1>Small tools that <span class="grad">just work.</span></h1>
+    <p>Android apps and Chrome extensions by My Second Wish, each built to do one job well.</p>
+    <nav class="jump" aria-label="Sections">
+      <a href="#android">Android apps <span class="count">2</span></a>
+      <a href="#extensions">Chrome extensions <span class="count">1</span></a>
+    </nav>
+  </section>
+
+  <section class="group" id="android" aria-labelledby="android-title">
+    <div class="group__head">
+      <span class="group__icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></svg>
+      </span>
+      <div>
+        <h2 id="android-title">Android apps</h2>
+        <p>For phones and tablets</p>
+      </div>
     </div>
-  </a>
 
-  <a class="row" href="/dimlock/">
-    <img src="/dimlock/icon.png" alt="" width="512" height="512">
-    <div>
-      <strong>DimLock</strong>
-      <span>A black screen that blocks every touch while your video keeps playing.</span>
+    <div class="grid">
+      <article class="card card--gold">
+        <div class="card__top">
+          <div class="card__icon card__icon--pad"><img src="/teleprompter/mark.svg" alt="" width="1000" height="1000"></div>
+          <div class="badges"><span class="badge">Android</span></div>
+        </div>
+        <p class="tagline">TAP. READ. ROLL.</p>
+        <h3><a href="/teleprompter/">Teleprompter <span class="accent">Deck</span></a></h3>
+        <p class="desc">Scroll your script at your pace, record to camera, and never lose your place.</p>
+        <div class="actions">
+          <a class="btn btn--solid" href="/teleprompter/">Learn more
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+          <span class="links"><a href="/teleprompter/privacy/">Privacy</a><a href="/teleprompter/support/">Support</a></span>
+        </div>
+      </article>
+
+      <article class="card card--violet">
+        <div class="card__top">
+          <div class="card__icon"><img src="/dimlock/icon.png" alt="" width="512" height="512"></div>
+          <div class="badges"><span class="badge badge--live">On Google Play</span></div>
+        </div>
+        <p class="tagline">DARK SCREEN. VIDEO PLAYS.</p>
+        <h3><a href="/dimlock/">DimLock</a></h3>
+        <p class="desc">A black screen that blocks every touch while your video keeps playing. Listen with the screen dark, save battery, and stop stray taps.</p>
+        <div class="actions">
+          <a class="btn btn--solid" href="https://play.google.com/store/apps/details?id=com.mysecondwish.blackscreen">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4.6 2.3c-.3.3-.4.7-.4 1.2v17c0 .5.1.9.4 1.2l9.6-9.7-9.6-9.7Zm10.7 8.6 2.8-2.8L5.9 1.2c-.3-.2-.7-.2-1 0l10.4 9.7Zm0 2.2L4.9 22.8c.3.2.7.2 1 0l12.2-6.9-2.8-2.8Zm4.2-4.2-3.1 3.1 3.1 3.1 2.7-1.6c.8-.5.8-1.6 0-2.1l-2.7-1.5Z"/></svg>
+            Get it on Google Play</a>
+          <span class="links"><a href="/dimlock/privacy/">Privacy</a><a href="/dimlock/support/">Support</a></span>
+        </div>
+      </article>
     </div>
-  </a>
+  </section>
 
-  <a class="row" href="/responsive-lens/">
-    <img src="/responsive-lens/icon.svg" alt="" width="512" height="512">
-    <div>
-      <strong>Responsive Lens</strong>
-      <span>See any website on 90 real phones, tablets and computers, right in Chrome.</span>
+  <section class="group" id="extensions" aria-labelledby="extensions-title">
+    <div class="group__head">
+      <span class="group__icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="M2.5 8.5h19"/><path d="M5.5 6.25h.01M8 6.25h.01M10.5 6.25h.01"/></svg>
+      </span>
+      <div>
+        <h2 id="extensions-title">Chrome extensions</h2>
+        <p>For your browser</p>
+      </div>
     </div>
-  </a>
 
-  <footer>
+    <div class="grid">
+      <article class="card card--blue">
+        <div class="card__top">
+          <div class="card__icon card__icon--pad"><img src="/responsive-lens/icon.svg" alt="" width="512" height="512"></div>
+          <div class="badges"><span class="badge">Chrome</span><span class="badge badge--soon">Coming soon</span></div>
+        </div>
+        <p class="tagline">EVERY SCREEN. ONE CLICK.</p>
+        <h3><a href="/responsive-lens/">Responsive Lens</a></h3>
+        <p class="desc">See any website on 90 real phones, tablets and computers, right over the page. Compare devices side by side, save mockups and record video.</p>
+        <div class="actions">
+          <a class="btn btn--solid" href="/responsive-lens/">Learn more
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+          <span class="links"><a href="/responsive-lens/privacy/">Privacy</a><a href="/responsive-lens/support/">Support</a></span>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <footer class="bottom">
+    <span>© <span id="y">2026</span> My Second Wish</span>
     <a href="mailto:mysecondwish11@gmail.com">mysecondwish11@gmail.com</a>
   </footer>
-</main>
+</div>
+<script>document.getElementById('y').textContent = new Date().getFullYear();</script>
 </body>
 </html>
