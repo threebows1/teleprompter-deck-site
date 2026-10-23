@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy policy · Wa SenderVel</title>
-<meta name="description" content="Privacy policy for the Wa SenderVel Chrome extension: no accounts, no analytics, no servers. Your contacts and messages stay in your browser.">
+<meta name="description" content="Privacy policy for the Wa SenderVel Chrome extension: no accounts and no servers. Your contacts and messages stay in your browser; only anonymous usage counts are shared, and you can turn that off.">
 <link rel="stylesheet" href="/style.css">
 <style>:root { --accent: #12b76a; }</style>
 <link rel="icon" href="/wa-sendervel/icon.png" type="image/png">
@@ -15,10 +15,17 @@
   <h1>Privacy policy</h1>
   <p class="tag">WA SENDERVEL</p>
 
-  <p>Last updated 23 October 2026. This policy covers the Wa SenderVel extension for Google Chrome, made by Farrukh Shahzad. Wa SenderVel works inside WhatsApp Web and sends personalised messages to a list of your contacts. In short: the developer collects nothing, and your contacts, messages and reports stay in your browser.</p>
+  <p>Last updated 23 October 2026 (usage statistics added). This policy covers the Wa SenderVel extension for Google Chrome, made by Farrukh Shahzad. Wa SenderVel works inside WhatsApp Web and sends personalised messages to a list of your contacts. In short: your contacts, messages and reports stay in your browser. The developer only receives anonymous usage counts, and you can turn those off.</p>
 
   <h2>What the developer collects</h2>
-  <p>Nothing. Wa SenderVel has no accounts, no analytics, no tracking, no advertising and no servers. It does not send any information to the developer or to any third party.</p>
+  <p>Wa SenderVel has no accounts, no advertising and no servers of its own. The only thing it sends is anonymous usage statistics, so the developer can see how the extension is used and improve it. They are sent to Google Analytics, through the developer's Firebase project, and contain:</p>
+  <ul>
+    <li>which actions happened: the extension was installed or updated, the panel was opened, a campaign was started, paused, resumed, stopped or finished, the daily limit was reached, a privacy option was switched, a single chat was opened;</li>
+    <li>numbers and choices about a campaign: how many recipients and message versions, the sending mode and pace, whether a file was attached, whether the list was pasted or imported, how many messages were sent, skipped or failed, and how long it took;</li>
+    <li>the extension's version, and a random identifier created for this browser, which is not linked to you, your Google account or your WhatsApp account.</li>
+  </ul>
+  <p>The statistics never include phone numbers, contact names, CSV contents, message text, attachments or anything from your chats. Google processes them under <a href="https://policies.google.com/privacy">Google's privacy policy</a>. You can turn them off at any time in the extension's Settings, under Usage statistics.</p>
+  <p>Nothing else is sent to the developer or to any third party.</p>
 
   <h2>Cost</h2>
   <p>Wa SenderVel is free. There is nothing to buy, and no payment details are ever asked for.</p>
@@ -26,7 +33,8 @@
   <h2>What is stored in your browser</h2>
   <p>The extension saves these items with Chrome's local extension storage, on this computer only:</p>
   <ul>
-    <li>your settings: sending pace and schedule, sending mode, daily limit, privacy options and where you placed the header button;</li>
+    <li>your settings: sending pace and schedule, sending mode, daily limit, privacy options, where you placed the header button, and whether usage statistics are on;</li>
+    <li>the random identifier used for usage statistics;</li>
     <li>your draft campaign: the phone numbers you paste or the CSV file you import (with all its columns), your message versions, and the file you choose to attach;</li>
     <li>the current or last campaign: each phone number, the message it was given, its result (sent, not on WhatsApp, blocked, skipped or failed) and the time;</li>
     <li>counts of how many messages were sent today and this month, for the daily limit.</li>
