@@ -9,6 +9,7 @@ to be reachable at a public URL.
 | `teleprompter/` | Teleprompter Deck (Android) | privacy, terms, support, delete-account |
 | `dimlock/` | DimLock (Android, `com.mysecondwish.blackscreen`) | privacy, terms, support, delete-account |
 | `responsive-lens/` | Responsive Lens (Chrome extension) | privacy, support |
+| `wa-sendervel/` | Wa SenderVel (Chrome extension) | privacy, support |
 
 `style.css` is shared. Each app's pages set their own `--accent` colour.
 `app-ads.txt` at the root lists the AdMob publisher ID that DimLock uses.

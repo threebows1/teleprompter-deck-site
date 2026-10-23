@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Apps · My Second Wish</title>
-<meta name="description" content="Android apps and Chrome extensions by My Second Wish: Teleprompter Deck, DimLock and Responsive Lens.">
+<meta name="description" content="Android apps and Chrome extensions by My Second Wish: Teleprompter Deck, DimLock, Responsive Lens and Wa SenderVel.">
 <meta property="og:title" content="Apps · My Second Wish">
 <meta property="og:description" content="Android apps and Chrome extensions by My Second Wish.">
 <meta property="og:image" content="https://apps.mysecondwish.com/icon-512.png">
@@ -25,6 +25,7 @@
     --gold: #e6b84c;
     --violet: #8b7bff;
     --blue: #4da3ff;
+    --green: #12b76a;
     --radius: 22px;
     color-scheme: dark;
   }
@@ -49,7 +50,8 @@
     background:
       radial-gradient(420px 300px at 18% 8%, color-mix(in srgb, var(--gold) 22%, transparent), transparent 70%),
       radial-gradient(460px 320px at 55% 0%, color-mix(in srgb, var(--violet) 26%, transparent), transparent 70%),
-      radial-gradient(420px 300px at 88% 12%, color-mix(in srgb, var(--blue) 22%, transparent), transparent 70%);
+      radial-gradient(420px 300px at 88% 12%, color-mix(in srgb, var(--blue) 22%, transparent), transparent 70%),
+      radial-gradient(380px 260px at 100% 40%, color-mix(in srgb, var(--green) 14%, transparent), transparent 70%);
     opacity: .55;
     mask-image: linear-gradient(#000 40%, transparent);
   }
@@ -122,6 +124,7 @@
   .card--gold { --c: var(--gold); }
   .card--violet { --c: var(--violet); }
   .card--blue { --c: var(--blue); }
+  .card--green { --c: var(--green); }
 
   .card__top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
   .card__icon {
@@ -163,7 +166,8 @@
   }
   .btn svg { width: 16px; height: 16px; }
   .btn--solid { background: var(--c); color: #0a0a10; }
-  .card--violet .btn--solid, .card--blue .btn--solid { color: #fff; }
+  .card--violet .btn--solid, .card--blue .btn--solid, .card--green .btn--solid { color: #fff; }
+  .card__icon--light { background: #fff; }
   .btn--solid:hover { filter: brightness(1.1); transform: translateY(-1px); }
   .links { display: flex; gap: 14px; font-size: .88rem; }
   .links a { color: var(--faint); text-decoration: none; }
@@ -209,7 +213,7 @@
     <p>Android apps and Chrome extensions by My Second Wish, each built to do one job well.</p>
     <nav class="jump" aria-label="Sections">
       <a href="#android">Android apps <span class="count">2</span></a>
-      <a href="#extensions">Chrome extensions <span class="count">1</span></a>
+      <a href="#extensions">Chrome extensions <span class="count">2</span></a>
     </nav>
   </section>
 
@@ -282,6 +286,21 @@
           <a class="btn btn--solid" href="/responsive-lens/">Learn more
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
           <span class="links"><a href="/responsive-lens/privacy/">Privacy</a><a href="/responsive-lens/support/">Support</a></span>
+        </div>
+      </article>
+
+      <article class="card card--green">
+        <div class="card__top">
+          <div class="card__icon card__icon--pad card__icon--light"><img src="/wa-sendervel/icon.png" alt="" width="512" height="512"></div>
+          <div class="badges"><span class="badge">Chrome</span><span class="badge badge--soon">Coming soon</span></div>
+        </div>
+        <p class="tagline">YOUR CUSTOMERS. ONE CAMPAIGN.</p>
+        <h3><a href="/wa-sendervel/">Wa SenderVel</a></h3>
+        <p class="desc">Send personalised messages to your customer list from WhatsApp Web: CSV import, message versions, scheduling, live progress and reports.</p>
+        <div class="actions">
+          <a class="btn btn--solid" href="/wa-sendervel/">Learn more
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+          <span class="links"><a href="/wa-sendervel/privacy/">Privacy</a><a href="/wa-sendervel/support/">Support</a></span>
         </div>
       </article>
     </div>
