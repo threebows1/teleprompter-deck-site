@@ -8,11 +8,12 @@ to be reachable at a public URL.
 | --- | --- | --- |
 | `teleprompter/` | Teleprompter Deck (Android) | privacy, terms, support, delete-account |
 | `dimlock/` | DimLock (Android, `com.mysecondwish.blackscreen`) | privacy, terms, support, delete-account |
+| `signvel/` | SignVel (Android, `com.mysecondwish.signvel`) | privacy, terms, support |
 | `responsive-lens/` | Responsive Lens (Chrome extension) | privacy, support |
 | `wa-sendervel/` | Wa SenderVel (Chrome extension) | privacy, support |
 
 `style.css` is shared. Each app's pages set their own `--accent` colour.
-`app-ads.txt` at the root lists the AdMob publisher ID that DimLock uses.
+`app-ads.txt` at the root lists the AdMob publisher ID that DimLock and SignVel use.
 
 This repository is public **only** because GitHub Pages needs it to be on the
 free plan. It holds nothing but these pages — the apps' source lives in
