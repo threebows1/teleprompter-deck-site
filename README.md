@@ -13,7 +13,7 @@ to be reachable at a public URL.
 | `wa-sendervel/` | Wa SenderVel (Chrome extension) | privacy, support |
 
 `style.css` is shared. Each app's pages set their own `--accent` colour.
-`app-ads.txt` at the root lists the AdMob publisher ID that DimLock and SignVel use.
+`app-ads.txt` at the root lists the AdMob publisher IDs: pub-3748438999340132 is the current account (SignVel); pub-6821159100234374 is the earlier, rejected account, kept until no app uses it.
 
 This repository is public **only** because GitHub Pages needs it to be on the
 free plan. It holds nothing but these pages — the apps' source lives in
