@@ -67,7 +67,8 @@ async function setupEditor(ctx, signMode) {
   const zoomOut = h('button', { class: 'iconbtn', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => zoom(1 / 1.2) }, '−');
   const zoomIn = h('button', { class: 'iconbtn', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => zoom(1.2) }, '+');
   const undoBtn = h('button', { class: 'iconbtn', title: 'Undo (Ctrl+Z)', 'aria-label': 'Undo', onclick: () => undo() }, icon('undo'));
-  bar.append(h('div', { class: 'ed-tools' }, toolBtns), h('div', { class: 'ed-zoom' }, undoBtn, zoomOut, zoomIn));
+  const zoomLbl = h('span', { class: 'ed-zoomlbl', 'aria-live': 'polite' });
+  bar.append(h('div', { class: 'ed-tools' }, toolBtns), h('div', { class: 'ed-zoom' }, undoBtn, h('span', { class: 'ed-sep' }), zoomOut, zoomLbl, zoomIn));
 
   /* pages */
   const pagesEl = h('div', { class: 'ed-pages' });
@@ -108,6 +109,7 @@ async function setupEditor(ctx, signMode) {
     });
     st.objects.forEach(place);
     pageEls.forEach((p) => p.layer.querySelectorAll('.tx, .mask').forEach(placeBox));
+    zoomLbl.textContent = Math.round(st.scale * 100) + '%';
     return avail;
   }
   function fitWidth() {

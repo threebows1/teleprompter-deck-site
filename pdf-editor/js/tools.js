@@ -42,6 +42,26 @@ const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); 
 /* ---------- shared views ---------- */
 
 // One card per PDF, with its first page. Used by tools that take whole files.
+// The one file a single-file tool works on, large and centred.
+function fileHero(doc) {
+  const canvas = h('canvas', { class: 'thumb' });
+  renderPage(doc.js, 0, 220, { canvas }).catch(() => {});
+  return h('div', { class: 'hero-file' },
+    h('div', { class: 'hero-file__page' }, canvas),
+    h('strong', { title: doc.name }, doc.name),
+    h('span', {}, `${doc.pages} page${doc.pages > 1 ? 's' : ''} · ${fmtSize(doc.size)}`));
+}
+
+// A compact line for the file, for sidebars.
+function fileRow(doc) {
+  const canvas = h('canvas', { class: 'thumb' });
+  renderPage(doc.js, 0, 44, { canvas }).catch(() => {});
+  return h('div', { class: 'file-row' }, h('div', { class: 'file-row__page' }, canvas),
+    h('div', { class: 'card__meta' }, h('strong', { title: doc.name }, doc.name), h('span', {}, `${doc.pages} page${doc.pages > 1 ? 's' : ''} · ${fmtSize(doc.size)}`)));
+}
+
+const GROUP_COLORS = ['#60a5fa', '#f472b6', '#34d399', '#fbbf24', '#a78bfa', '#fb923c', '#22d3ee', '#f87171'];
+
 function fileCard(doc, extra = []) {
   const canvas = h('canvas', { class: 'thumb' });
   renderPage(doc.js, 0, 150, { canvas }).catch(() => {});
@@ -185,7 +205,8 @@ const split = {
         const i = +c.dataset.i;
         c.classList.toggle('on', s.mode === 'every' || inSet.has(i));
         const gi = groups.findIndex((g) => g.includes(i));
-        c.style.setProperty('--g', gi < 0 ? '' : `hsl(${(gi * 67) % 360} 80% 62%)`);
+        c.style.setProperty('--g', gi < 0 ? '' : GROUP_COLORS[gi % GROUP_COLORS.length]);
+        c.dataset.group = gi < 0 || s.mode !== 'ranges' ? '' : `File ${gi + 1}`;
       });
       ctx.action.disabled = (s.mode === 'ranges' && (!!err || !groups.length)) || (s.mode === 'pick' && !s.picked.size);
       if (s.mode === 'pick') opts.querySelector('.muted').textContent = s.picked.size ? `${s.picked.size} page${s.picked.size > 1 ? 's' : ''} selected.` : 'Click the pages you want to keep.';
@@ -203,8 +224,8 @@ const split = {
     };
     ctx.main.append(grid);
     ctx.side.append(
-      fileCard(doc),
-      segmented([['ranges', 'Ranges'], ['every', 'Every page'], ['pick', 'Pick pages']], s.mode, (m) => { s.mode = m; drawOpts(); }),
+      fileRow(doc),
+      segmented([['ranges', 'Ranges'], ['every', 'Each page'], ['pick', 'Pick pages']], s.mode, (m) => { s.mode = m; drawOpts(); }),
       opts);
     drawOpts();
   },
@@ -335,7 +356,7 @@ const compress = {
   long: 'Shrink the photos and scans inside a PDF. Text stays sharp and selectable.',
   setup(ctx) {
     ctx.state = { level: 'medium' };
-    ctx.main.append(h('div', { class: 'cards' }, fileCard(ctx.items[0])));
+    ctx.main.append(fileHero(ctx.items[0]));
     ctx.side.append(choiceCards([
       ['low', 'Less compression', 'Best quality, smaller saving'],
       ['medium', 'Recommended', 'Good quality, good saving'],
@@ -727,7 +748,7 @@ const protect = {
       msg.textContent = !s.pw ? '' : s.pw !== s.pw2 ? 'The two passwords are different.' : s.pw.length < 6 ? 'Works, but a longer password is safer.' : '';
       msg.classList.toggle('bad', !!s.pw2 && s.pw !== s.pw2);
     };
-    ctx.main.append(h('div', { class: 'cards' }, fileCard(ctx.items[0])));
+    ctx.main.append(fileHero(ctx.items[0]));
     ctx.side.append(
       field('Password', a), field('Type it again', b), show, msg,
       h('p', { class: 'f__label' }, 'Once opened, people can:'),
@@ -759,7 +780,7 @@ const unlock = {
     const doc = ctx.items[0];
     let locked = true;
     try { await PDFDocument.load(doc.bytes, { updateMetadata: false }); locked = false; } catch { /* encrypted */ }
-    ctx.main.append(h('div', { class: 'cards' }, fileCard(doc)));
+    ctx.main.append(fileHero(doc));
     ctx.side.append(h('p', {}, locked
       ? (doc.password != null ? 'Password accepted. Press the button to save a copy without it.' : 'This PDF has restrictions (no password to open). Press the button to remove them.')
       : 'This PDF has no password or restrictions. There is nothing to remove.'));
