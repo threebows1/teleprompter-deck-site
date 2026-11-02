@@ -20,6 +20,12 @@ This repository is public **only** because GitHub Pages needs it to be on the
 free plan. It holds nothing but these pages — the apps' source lives in
 private repositories.
 
+## Do not edit `pdf-editor/` here
+
+It is copied from `site/` in the private `pdf-tools` repository by
+`tool/publish.sh` there, which replaces the whole folder. Changes made here
+are lost on the next publish.
+
 ## Do not edit `privacy-policy.html` here
 
 It is generated from `play/PRIVACY-POLICY.md` in the app repository by
