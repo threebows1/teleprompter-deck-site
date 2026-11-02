@@ -8,6 +8,7 @@ import {
   h, icon, busy, tick, StandardFonts, degrees, BlendMode, loadLib, renderPage, baseName, pageSizes,
   pageFrame, boxAnchor, fontCanDraw, textAsPng, hexToRgb, imageForPdf, pickFiles, modal, uid, toast,
 } from './core.js';
+import { readPage, matchItems, dropOps, plan } from './content.js';
 
 const FONTS = {
   Helvetica: { css: 'Helvetica, Arial, sans-serif', std: ['Helvetica', 'HelveticaBold'], base: 0.947 },
@@ -29,10 +30,10 @@ export function editorTool(mode) {
     color: sign ? '#f472b6' : '#fb7185',
     action: sign ? 'Sign and save' : 'Save PDF',
     busyText: 'Saving…',
-    desc: sign ? 'Draw, type or upload your signature and place it on the page.' : 'Add text, images, drawings, highlights and white-out to a PDF.',
+    desc: sign ? 'Draw, type or upload your signature and place it on the page.' : 'Change, move or delete the text in a PDF, and add text, images and drawings.',
     long: sign
       ? 'Make your signature once, then click on the page to place it. Add the date or your name the same way.'
-      : 'Add text, images, your signature, pen drawings and highlights. Cover existing text with white-out and type over it.',
+      : 'Click any text in the PDF to change it, drag it to move it, or delete it. Add new text, images, your signature, drawings and highlights.',
     setup: (ctx) => setupEditor(ctx, sign),
     run: (ctx) => saveEditor(ctx),
   };
@@ -44,7 +45,9 @@ async function setupEditor(ctx, signMode) {
   const doc = ctx.items[0];
   const sizes = await pageSizes(doc.js);
   const st = ctx.state = {
-    doc, sizes, objects: [], history: [], tool: 'select', selected: null, editing: null, pending: null, scale: 1,
+    doc, sizes, objects: [], history: [], tool: signMode ? 'select' : 'edittext', selected: null, editing: null, pending: null, scale: 1,
+    texts: [], // per page: the PDF's own text, once read (see readText)
+    removed: new Map(), // "page:item" -> mask colour, for original text taken out
     text: { font: 'Helvetica', size: 14, color: '#111111', bold: false },
     pen: { color: '#1d4ed8', width: 2 },
     mark: { color: '#fde047' },
@@ -55,7 +58,7 @@ async function setupEditor(ctx, signMode) {
   /* toolbar */
   const tools = signMode
     ? [['select', 'cursor', 'Select'], ['sign', 'sign', 'Signature'], ['text', 'text', 'Text'], ['date', 'numbers', 'Date'], ['image', 'image', 'Image']]
-    : [['select', 'cursor', 'Select'], ['text', 'text', 'Text'], ['sign', 'sign', 'Signature'], ['image', 'image', 'Image'], ['draw', 'pen', 'Draw'], ['highlight', 'highlight', 'Highlight'], ['whiteout', 'whiteout', 'White-out']];
+    : [['edittext', 'edit', 'Edit text'], ['select', 'cursor', 'Select'], ['text', 'text', 'Add text'], ['sign', 'sign', 'Signature'], ['image', 'image', 'Image'], ['draw', 'pen', 'Draw'], ['highlight', 'highlight', 'Highlight'], ['whiteout', 'whiteout', 'White-out']];
   const bar = h('div', { class: 'ed-bar', role: 'toolbar', 'aria-label': 'Editing tools' });
   const toolBtns = tools.map(([id, ic, label]) => {
     const b = h('button', { class: 'ed-tool', 'data-tool': id, title: label, onclick: () => pickTool(id) }, icon(ic), h('span', {}, label));
@@ -90,6 +93,7 @@ async function setupEditor(ctx, signMode) {
     if (p.rendered === st.scale) return;
     p.rendered = st.scale;
     await renderPage(doc.js, i, sizes[i].w * st.scale, { canvas: p.canvas }).catch(() => {});
+    if (!signMode) showBoxes(i);
   }
 
   function layout() {
@@ -103,6 +107,7 @@ async function setupEditor(ctx, signMode) {
       if (p.getBoundingClientRect().top < window.innerHeight + 600 && p.getBoundingClientRect().bottom > -600) paintPage(i);
     });
     st.objects.forEach(place);
+    pageEls.forEach((p) => p.layer.querySelectorAll('.tx, .mask').forEach(placeBox));
     return avail;
   }
   function fitWidth() {
@@ -129,8 +134,7 @@ async function setupEditor(ctx, signMode) {
       sigList,
       h('button', { class: 'btn btn--ghost btn--block', onclick: () => newSignature() }, icon('plus'), 'New signature'),
       h('p', { class: 'muted small' }, 'Pick a signature, then click on the page where it goes. Drag to move it, use the corner to resize.')),
-    props,
-    !signMode && h('p', { class: 'muted small' }, 'Tip: to change existing text, cover it with White-out and type the new text on top.'));
+    props);
 
   function drawSigs() {
     const list = loadSigs();
@@ -170,6 +174,7 @@ async function setupEditor(ctx, signMode) {
         h('input', { type: 'color', class: 'swatch', value: t.color, 'aria-label': 'Colour', oninput: (e) => { (which === 'highlight' ? st.mark : st.white).color = e.target.value; if (o) { o.color = e.target.value; restyle(o); } } }),
         !o && h('p', { class: 'muted small' }, 'Drag across the page to draw the box.'));
     }
+    if (!o && st.tool === 'edittext') kids.push(h('p', { class: 'f__label' }, 'Edit text'), h('p', { class: 'muted small' }, 'Every piece of text in the PDF has a box around it. Click one to type over it, or drag it somewhere else. To delete it, click it and clear the text. Scanned pages have no text to edit.'));
     if (o) kids.push(h('button', { class: 'btn btn--ghost btn--block danger', onclick: () => remove(o) }, icon('trash'), 'Delete'));
     props.replaceChildren(...kids);
   }
@@ -232,15 +237,111 @@ async function setupEditor(ctx, signMode) {
     armImage(src, 'sig');
   }
 
+  /* the PDF's own text */
+
+  // Reads page i's text with pdf.js (what it says, where, how big) and the
+  // page's drawing commands with content.js (which command draws it).
+  function readText(i) {
+    if (st.texts[i]) return st.texts[i];
+    st.texts[i] = (async () => {
+      st.lib ||= await loadLib(doc);
+      const page = await doc.js.getPage(i + 1);
+      const tc = await page.getTextContent();
+      await page.getOperatorList(); // makes the fonts' real names available
+      const vp = page.getViewport({ scale: 1 });
+      const items = tc.items.filter((it) => typeof it.str === 'string');
+      try { matchItems(items, readPage(st.lib, i).shows); } catch (err) {
+        console.warn('content stream', err);
+        items.forEach((it) => { it.own = []; it.parent = -1; it.color = '#000000'; });
+      }
+      items.forEach((it, j) => {
+        it.key = `${i}:${j}`;
+        const tx = window.pdfjsLib.Util.transform(vp.transform, it.transform);
+        const size = Math.hypot(tx[2], tx[3]);
+        it.upright = size > 0 && Math.abs(tx[1]) < 0.01 * size && Math.abs(tx[2]) < 0.01 * size && tx[0] > 0 && tx[3] < 0;
+        let name = '';
+        try { name = page.commonObjs.get(it.fontName)?.name || ''; } catch { /* not loaded */ }
+        const family = tc.styles[it.fontName]?.fontFamily;
+        it.font = /times|roman|georgia|garamond|cambria|minion|antiqua|bookman|palatino/i.test(name) || family === 'serif' ? 'Times'
+          : /courier|mono|consol/i.test(name) || family === 'monospace' ? 'Courier' : 'Helvetica';
+        it.bold = /bold|black|heavy|semibold|demi/i.test(name);
+        it.size = size;
+        it.box = { x: tx[4], y: tx[5] - size * 0.84, w: Math.max(it.width, size * 0.3), h: size * 1.1, base: tx[5] };
+      });
+      return items;
+    })();
+    return st.texts[i];
+  }
+
+  async function showBoxes(i) {
+    const items = await readText(i);
+    const layer = pageEls[i].layer;
+    layer.querySelectorAll('.tx').forEach((b) => b.remove());
+    for (const it of items) {
+      if (!it.upright || !it.str.trim() || st.removed.has(it.key)) continue;
+      const b = h('div', { class: 'tx', 'data-key': it.key, title: 'Click to edit, drag to move', 'aria-label': it.str });
+      b.box = it.box;
+      layer.prepend(b);
+      placeBox(b);
+    }
+    if (!items.some((it) => it.str.trim()) && !st.warnedScan && st.tool === 'edittext') {
+      st.warnedScan = true;
+      toast(`Page ${i + 1} has no text to edit. It is probably a scan or a picture.`);
+    }
+  }
+  function placeBox(b) {
+    const s = st.scale, r = b.box;
+    Object.assign(b.style, { left: r.x * s + 'px', top: r.y * s + 'px', width: r.w * s + 'px', height: r.h * s + 'px' });
+  }
+  // Covers removed original text on screen. (Saving takes it out for real.)
+  function drawMasks() {
+    pageEls.forEach((p) => p.layer.querySelectorAll('.mask').forEach((m) => m.remove()));
+    st.removed.forEach((color, key) => {
+      const [i, j] = key.split(':').map(Number);
+      st.texts[i]?.then((items) => {
+        const r = items[j].box;
+        const m = h('div', { class: 'mask', style: { background: color } });
+        m.box = { x: r.x - 1, y: r.y - 1, w: r.w + 2, h: r.h + 2 };
+        pageEls[i].layer.prepend(m);
+        placeBox(m);
+      });
+    });
+  }
+  // The paper colour around a piece of text, so the cover blends in.
+  function paperAround(i, r) {
+    const c = pageEls[i].canvas;
+    const k = c.width / sizes[i].w;
+    const cx = c.getContext('2d', { willReadFrequently: true });
+    const spots = [[r.x - 2, r.y + r.h / 2], [r.x + r.w + 2, r.y + r.h / 2], [r.x + r.w / 2, r.y - 2], [r.x + r.w / 2, r.y + r.h + 2]];
+    const px = spots.map(([x, y]) => {
+      try { return [...cx.getImageData(clamp(Math.round(x * k), 0, c.width - 1), clamp(Math.round(y * k), 0, c.height - 1), 1, 1).data]; } catch { return [255, 255, 255, 255]; }
+    }).sort((a, b) => (b[0] + b[1] + b[2]) - (a[0] + a[1] + a[2]));
+    const p = px[1]; // second lightest: ignores a neighbouring letter
+    return '#' + p.slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('');
+  }
+  // Turns a piece of the PDF's text into a normal text object.
+  async function takeText(i, key) {
+    const items = await readText(i);
+    const it = items[+key.split(':')[1]];
+    const o = add({ type: 'text', page: i, text: it.str, font: it.font, bold: it.bold, size: Math.round(it.size * 10) / 10, color: it.color, x: it.box.x, y: it.box.base - FONTS[it.font].base * it.size, orig: key });
+    st.removed.set(key, paperAround(i, it.box));
+    pageEls[i].layer.querySelector(`.tx[data-key="${key}"]`)?.remove();
+    drawMasks();
+    return o;
+  }
+
   /* objects */
-  const snapshot = () => { st.history.push(st.objects.map((o) => ({ ...o }))); if (st.history.length > 60) st.history.shift(); };
+  const snapshot = () => { st.history.push({ objects: st.objects.map((o) => ({ ...o })), removed: new Map(st.removed) }); if (st.history.length > 60) st.history.shift(); };
   function undo() {
     const prev = st.history.pop();
     if (!prev) return;
     els.forEach((el) => el.remove());
     els.clear();
-    st.objects = prev;
+    st.objects = prev.objects;
+    st.removed = prev.removed;
     st.objects.forEach((o) => { make(o); place(o); });
+    drawMasks();
+    st.texts.forEach((t, i) => t && showBoxes(i));
     select(null);
   }
   function add(o) {
@@ -375,11 +476,42 @@ async function setupEditor(ctx, signMode) {
       return;
     }
 
+    // Grabbing the PDF's own text: it becomes a text object, then the same
+    // gesture moves it (drag) or starts typing (click).
+    const txEl = st.tool === 'edittext' && !objEl && e.target.closest('.tx');
+    if (txEl) {
+      e.preventDefault();
+      let up = null, last = null;
+      // The conversion is async; remember the pointer meanwhile.
+      const early = (ev) => (last = ev);
+      const earlyUp = (ev) => (up = ev);
+      window.addEventListener('pointermove', early);
+      window.addEventListener('pointerup', earlyUp, { once: true });
+      takeText(page, txEl.dataset.key).then((o) => {
+        window.removeEventListener('pointermove', early);
+        window.removeEventListener('pointerup', earlyUp);
+        select(o.id);
+        const start = { ...o };
+        let moved = false;
+        const move = (ev) => {
+          const q = pt(layer, ev);
+          const dx = q.x - p.x, dy = q.y - p.y;
+          if (!moved && Math.hypot(dx, dy) * st.scale < 3) return;
+          moved = true;
+          o.x = start.x + dx; o.y = start.y + dy; place(o);
+        };
+        if (last) move(last);
+        if (up) { if (!moved) editText(o); return; }
+        drag(e, move, () => { if (!moved) editText(o); });
+      });
+      return;
+    }
+
     // Moving or resizing an existing object.
     const hit = objEl && st.objects.find((x) => x.id === objEl.dataset.id);
     // In Text mode only existing text is grabbed; clicking white-out or an
     // image starts new text on top of it.
-    if (hit && (st.tool === 'select' || hit.type === 'text') && ['select', 'text', 'date'].includes(st.tool)) {
+    if (hit && (st.tool === 'select' || hit.type === 'text') && ['select', 'text', 'date', 'edittext'].includes(st.tool)) {
       const o = hit;
       if (st.editing === o.id) return; // typing: let the caret move
       e.preventDefault();
@@ -401,7 +533,7 @@ async function setupEditor(ctx, signMode) {
       return;
     }
 
-    if (st.tool === 'select') { select(null); return; }
+    if (st.tool === 'select' || st.tool === 'edittext') { select(null); return; }
 
     if (st.tool === 'text' || st.tool === 'date') {
       e.preventDefault();
@@ -494,13 +626,48 @@ async function saveEditor(ctx) {
   const st = ctx.state;
   if (st.editing) document.activeElement?.blur();
   await tick();
-  if (!st.objects.length) throw new Error('Add something to the pages first.');
+  if (!st.objects.length && !st.removed.size) throw new Error('Change something on the pages first.');
   const lib = await loadLib(st.doc);
   const fonts = {};
   const font = async (name, bold) => {
     const key = FONTS[name].std[bold ? 1 : 0];
     return (fonts[key] ||= await lib.embedFont(StandardFonts[key]));
   };
+
+  // Original text that was changed, moved or deleted: take its drawing
+  // commands out of the page. A command can carry neighbouring text too;
+  // plan() finds that text, and it is drawn again where it was.
+  const byPage = new Map();
+  st.removed.forEach((color, key) => {
+    const [i, j] = key.split(':').map(Number);
+    if (!byPage.has(i)) byPage.set(i, new Map());
+    byPage.get(i).set(j, color);
+  });
+  for (const [i, colors] of byPage) {
+    const items = await st.texts[i];
+    const read = readPage(lib, i);
+    const { drop, redraw, cover } = plan(items, new Set(colors.keys()));
+    if (drop.size) dropOps(lib, read, drop);
+    const page = read.page;
+    for (const j of cover) { // text we couldn't find the command for (e.g. inside a form)
+      const it = items[j];
+      const t = it.transform, s = Math.hypot(t[2], t[3]), len = Math.hypot(t[0], t[1]) || 1;
+      const ux = -t[1] / len, uy = t[0] / len; // "up" for this text
+      page.drawRectangle({ x: t[4] - ux * 0.25 * s, y: t[5] - uy * 0.25 * s, width: Math.max(it.width, s * 0.3), height: s * 1.2, rotate: degrees((Math.atan2(t[1], t[0]) * 180) / Math.PI), color: hexToRgb(colors.get(j)) });
+    }
+    for (const j of redraw) {
+      const it = items[j];
+      if (!it.str) continue;
+      const t = it.transform, s = Math.hypot(t[2], t[3]);
+      const rotate = degrees((Math.atan2(t[1], t[0]) * 180) / Math.PI);
+      const fnt = await font(it.font, it.bold);
+      if (fontCanDraw(fnt, it.str)) page.drawText(it.str, { x: t[4], y: t[5], size: s, font: fnt, color: hexToRgb(it.color), rotate });
+      else {
+        const png = await textAsPng(it.str, { family: FONTS[it.font].css, bold: it.bold, size: s, color: it.color, lineHeight: LH });
+        page.drawImage(await lib.embedPng(png.bytes), { x: t[4], y: t[5] - s * 0.3, width: png.width, height: png.height, rotate });
+      }
+    }
+  }
   const images = new Map();
   const embedSrc = async (src) => {
     if (images.has(src)) return images.get(src);

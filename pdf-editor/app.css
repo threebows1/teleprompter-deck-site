@@ -244,6 +244,10 @@ select.field { appearance: auto; }
 .ed-pages[data-tool="text"] .ed-layer, .ed-pages[data-tool="date"] .ed-layer { cursor: text; }
 .ed-pages[data-tool="draw"] .ed-layer, .ed-pages[data-tool="highlight"] .ed-layer, .ed-pages[data-tool="whiteout"] .ed-layer, .ed-pages[data-tool="place"] .ed-layer { cursor: crosshair; touch-action: none; }
 .ed-pages[data-tool="draw"] .obj, .ed-pages[data-tool="highlight"] .obj, .ed-pages[data-tool="whiteout"] .obj { pointer-events: none; }
+.tx { position: absolute; display: none; border-radius: 2px; cursor: text; }
+.ed-pages[data-tool="edittext"] .tx { display: block; outline: 1px dashed color-mix(in srgb, var(--c) 55%, transparent); outline-offset: 1px; }
+.ed-pages[data-tool="edittext"] .tx:hover { background: color-mix(in srgb, var(--c) 14%, transparent); outline-style: solid; }
+.mask { position: absolute; pointer-events: none; }
 .obj { position: absolute; cursor: move; touch-action: none; }
 .obj.sel { outline: 1.5px dashed var(--c); outline-offset: 2px; }
 .obj__h { display: none; position: absolute; right: -7px; bottom: -7px; width: 13px; height: 13px; border-radius: 3px; background: var(--c); border: 2px solid #fff; cursor: nwse-resize; }
