@@ -130,7 +130,7 @@ function previewPane(doc, build) {
 /* ---------- MERGE ---------- */
 
 const merge = {
-  id: 'merge', title: 'Merge PDF', icon: 'merge', color: '#ff6b5e', cat: 'organize', multiple: true, action: 'Merge PDF',
+  id: 'merge', keywords: 'combine join', title: 'Merge PDF', icon: 'merge', color: '#3b82f6', cat: 'organize', multiple: true, action: 'Merge PDF',
   desc: 'Join several PDFs into one, in the order you want.',
   long: 'Put PDFs together in the order you want. Drag the cards to change the order.',
   setup(ctx) {
@@ -173,7 +173,7 @@ const merge = {
 /* ---------- SPLIT ---------- */
 
 const split = {
-  id: 'split', title: 'Split PDF', icon: 'split', color: '#ff9f43', cat: 'organize', action: 'Split PDF', wide: true,
+  id: 'split', keywords: 'extract separate cut', title: 'Split PDF', icon: 'split', color: '#ec4899', cat: 'organize', action: 'Split PDF', wide: true,
   desc: 'Take pages out, or cut a PDF into several files.',
   long: 'Cut a PDF into several files by page ranges, one file per page, or pick the pages to keep.',
   setup(ctx) {
@@ -334,11 +334,11 @@ function pagesTool({ id, title, icon: ic, color, desc, long, action, reorder }) 
 }
 
 const organize = pagesTool({
-  id: 'organize', title: 'Organize PDF', icon: 'organize', color: '#a78bfa', action: 'Save PDF', reorder: true,
+  id: 'organize', title: 'Organize PDF', icon: 'organize', color: '#4f6ef7', action: 'Save PDF', reorder: true,
   desc: 'Reorder, delete and rotate pages, or add pages from another PDF.',
 });
 const rotate = pagesTool({
-  id: 'rotate', title: 'Rotate PDF', icon: 'rotate', color: '#c084fc', action: 'Rotate PDF', reorder: false,
+  id: 'rotate', title: 'Rotate PDF', icon: 'rotate', color: '#8b5cf6', action: 'Rotate PDF', reorder: false,
   desc: 'Turn some pages or the whole PDF the right way up.',
 });
 
@@ -351,7 +351,7 @@ const LEVELS = {
 };
 
 const compress = {
-  id: 'compress', title: 'Compress PDF', icon: 'compress', color: '#2dd4bf', cat: 'optimize', action: 'Compress PDF', busyText: 'Compressing…',
+  id: 'compress', keywords: 'reduce shrink size smaller', title: 'Compress PDF', icon: 'compress', color: '#fb923c', cat: 'optimize', action: 'Compress PDF', busyText: 'Compressing…',
   desc: 'Make a PDF smaller while keeping it readable.',
   long: 'Shrink the photos and scans inside a PDF. Text stays sharp and selectable.',
   setup(ctx) {
@@ -466,7 +466,7 @@ async function decodeImage(stream, w, hgt, { PDFName, decodePDFRawStream }) {
 const SIZES = { a4: [595.28, 841.89], letter: [612, 792] };
 
 const jpgToPdf = {
-  id: 'jpg-to-pdf', title: 'JPG to PDF', icon: 'jpgToPdf', color: '#facc15', cat: 'convert', accept: 'image', multiple: true, action: 'Convert to PDF', busyText: 'Converting…',
+  id: 'jpg-to-pdf', keywords: 'image photo png jpeg convert', title: 'JPG to PDF', icon: 'jpgToPdf', color: '#14b8a6', cat: 'convert', accept: 'image', multiple: true, action: 'Convert to PDF', busyText: 'Converting…',
   desc: 'Turn photos and scans into a PDF.',
   long: 'Turn JPG, PNG and WebP images into a PDF. Drag the images to set the page order.',
   setup(ctx) {
@@ -530,7 +530,7 @@ const jpgToPdf = {
 /* ---------- PDF -> JPG ---------- */
 
 const pdfToJpg = {
-  id: 'pdf-to-jpg', title: 'PDF to JPG', icon: 'pdfToJpg', color: '#fde047', cat: 'convert', action: 'Convert to images', wide: true, busyText: 'Converting…',
+  id: 'pdf-to-jpg', keywords: 'image png jpeg convert export', title: 'PDF to JPG', icon: 'pdfToJpg', color: '#06b6d4', cat: 'convert', action: 'Convert to images', wide: true, busyText: 'Converting…',
   desc: 'Save every page, or the pages you pick, as images.',
   long: 'Save PDF pages as JPG or PNG images. Click pages to leave them out.',
   setup(ctx) {
@@ -577,7 +577,7 @@ const pdfToJpg = {
 const POS9 = ['tl', 'tc', 'tr', 'ml', 'mc', 'mr', 'bl', 'bc', 'br'];
 
 const watermark = {
-  id: 'watermark', title: 'Add watermark', icon: 'watermark', color: '#60a5fa', cat: 'edit', action: 'Add watermark', wide: true,
+  id: 'watermark', keywords: 'stamp logo brand', title: 'Add watermark', icon: 'watermark', color: '#e07a52', cat: 'edit', action: 'Add watermark', wide: true,
   desc: 'Stamp text or a logo across your pages.',
   long: 'Stamp text or an image on your pages. Choose where, how big and how see-through.',
   setup(ctx) {
@@ -676,7 +676,7 @@ const FORMATS = {
 };
 
 const pageNumbers = {
-  id: 'page-numbers', title: 'Page numbers', icon: 'numbers', color: '#38bdf8', cat: 'edit', action: 'Add page numbers', wide: true,
+  id: 'page-numbers', keywords: 'numbering footer', title: 'Page numbers', icon: 'numbers', color: '#a855f7', cat: 'edit', action: 'Add page numbers', wide: true,
   desc: 'Number your pages, with the style and position you choose.',
   setup(ctx) {
     const doc = ctx.items[0];
@@ -733,7 +733,7 @@ async function stampNumbers(lib, indexes, s, realIndex) {
 /* ---------- PROTECT / UNLOCK ---------- */
 
 const protect = {
-  id: 'protect', title: 'Protect PDF', icon: 'protect', color: '#34d399', cat: 'security', action: 'Protect PDF',
+  id: 'protect', keywords: 'password encrypt lock secure', title: 'Protect PDF', icon: 'protect', color: '#10b981', cat: 'security', action: 'Protect PDF',
   desc: 'Lock a PDF with a password.',
   long: 'Add a password. Nobody can open the PDF without it. Uses AES-256 encryption.',
   setup(ctx) {
@@ -773,7 +773,7 @@ const protect = {
 };
 
 const unlock = {
-  id: 'unlock', title: 'Unlock PDF', icon: 'unlock', color: '#4ade80', cat: 'security', action: 'Unlock PDF',
+  id: 'unlock', keywords: 'password decrypt remove', title: 'Unlock PDF', icon: 'unlock', color: '#22c55e', cat: 'security', action: 'Unlock PDF',
   desc: 'Remove the password from a PDF you can open.',
   long: 'Remove the password and restrictions from a PDF. You need to know its password.',
   async setup(ctx) {

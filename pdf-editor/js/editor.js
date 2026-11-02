@@ -11,9 +11,9 @@ import {
 import { readPage, matchItems, dropOps, plan } from './content.js';
 
 const FONTS = {
-  Helvetica: { css: 'Helvetica, Arial, sans-serif', std: ['Helvetica', 'HelveticaBold'], base: 0.947 },
-  Times: { css: '"Times New Roman", Times, serif', std: ['TimesRoman', 'TimesRomanBold'], base: 0.938 },
-  Courier: { css: '"Courier New", Courier, monospace', std: ['Courier', 'CourierBold'], base: 0.867 },
+  Helvetica: { label: 'Sans (Helvetica)', css: 'Helvetica, Arial, sans-serif', std: ['Helvetica', 'HelveticaBold'], base: 0.947 },
+  Times: { label: 'Serif (Times)', css: '"Times New Roman", Times, serif', std: ['TimesRoman', 'TimesRomanBold'], base: 0.938 },
+  Courier: { label: 'Mono (Courier)', css: '"Courier New", Courier, monospace', std: ['Courier', 'CourierBold'], base: 0.867 },
 };
 const LH = 1.2; // text line height, in em
 const SIG_KEY = 'pdftools.signatures';
@@ -24,10 +24,10 @@ const saveSigs = (list) => { try { localStorage.setItem(SIG_KEY, JSON.stringify(
 export function editorTool(mode) {
   const sign = mode === 'sign';
   return {
-    id: mode, cat: 'edit', wide: true, editor: true,
+    id: mode, cat: 'edit', wide: true, editor: true, keywords: sign ? 'signature esign initials date' : 'text change write image draw highlight whiteout',
     title: sign ? 'Sign PDF' : 'Edit PDF',
     icon: sign ? 'sign' : 'edit',
-    color: sign ? '#f472b6' : '#fb7185',
+    color: sign ? '#7c3aed' : '#6646e8',
     action: sign ? 'Sign and save' : 'Save PDF',
     busyText: 'Saving…',
     desc: sign ? 'Draw, type or upload your signature and place it on the page.' : 'Change, move or delete the text in a PDF, and add text, images and drawings.',
@@ -48,7 +48,7 @@ async function setupEditor(ctx, signMode) {
     doc, sizes, objects: [], history: [], tool: signMode ? 'select' : 'edittext', selected: null, editing: null, pending: null, scale: 1,
     texts: [], // per page: the PDF's own text, once read (see readText)
     removed: new Map(), // "page:item" -> mask colour, for original text taken out
-    text: { font: 'Helvetica', size: 14, color: '#111111', bold: false },
+    text: { font: 'Helvetica', size: 14, color: '#111827', bold: false, align: 'left' },
     pen: { color: '#1d4ed8', width: 2 },
     mark: { color: '#fde047' },
     white: { color: '#ffffff' },
@@ -59,29 +59,55 @@ async function setupEditor(ctx, signMode) {
   const tools = signMode
     ? [['select', 'cursor', 'Select'], ['sign', 'sign', 'Signature'], ['text', 'text', 'Text'], ['date', 'numbers', 'Date'], ['image', 'image', 'Image']]
     : [['edittext', 'edit', 'Edit text'], ['select', 'cursor', 'Select'], ['text', 'text', 'Add text'], ['sign', 'sign', 'Signature'], ['image', 'image', 'Image'], ['draw', 'pen', 'Draw'], ['highlight', 'highlight', 'Highlight'], ['whiteout', 'whiteout', 'White-out']];
-  const bar = h('div', { class: 'ed-bar', role: 'toolbar', 'aria-label': 'Editing tools' });
-  const toolBtns = tools.map(([id, ic, label]) => {
-    const b = h('button', { class: 'ed-tool', 'data-tool': id, title: label, onclick: () => pickTool(id) }, icon(ic), h('span', {}, label));
-    return b;
-  });
+  // Left rail of tools (a scrolling strip on phones).
+  const rail = h('nav', { class: 'ed-rail', role: 'toolbar', 'aria-label': 'Editing tools' });
+  const toolBtns = tools.map(([id, ic, label]) =>
+    h('button', { class: 'ed-tool', 'data-tool': id, title: label, onclick: () => pickTool(id) }, icon(ic), h('span', {}, label)));
+  rail.append(...toolBtns);
+
+  // Top bar over the document: where you are, undo, zoom.
   const zoomOut = h('button', { class: 'iconbtn', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => zoom(1 / 1.2) }, '−');
   const zoomIn = h('button', { class: 'iconbtn', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => zoom(1.2) }, '+');
   const undoBtn = h('button', { class: 'iconbtn', title: 'Undo (Ctrl+Z)', 'aria-label': 'Undo', onclick: () => undo() }, icon('undo'));
   const zoomLbl = h('span', { class: 'ed-zoomlbl', 'aria-live': 'polite' });
-  bar.append(h('div', { class: 'ed-tools' }, toolBtns), h('div', { class: 'ed-zoom' }, undoBtn, h('span', { class: 'ed-sep' }), zoomOut, zoomLbl, zoomIn));
+  const pageLbl = h('span', { class: 'ed-where' });
+  const top = h('div', { class: 'ed-top' },
+    h('div', { class: 'ed-doc' }, h('span', { class: 'ed-doc__tag' }, 'PDF'), h('strong', { title: doc.name }, doc.name), pageLbl),
+    h('div', { class: 'ed-zoom' }, undoBtn, h('span', { class: 'ed-sep' }), zoomOut, zoomLbl, zoomIn));
 
   /* pages */
   const pagesEl = h('div', { class: 'ed-pages' });
   const pageEls = sizes.map((sz, i) => {
     const canvas = h('canvas');
     const layer = h('div', { class: 'ed-layer', 'data-page': i });
-    const wrap = h('div', { class: 'ed-page', 'data-page': i }, canvas, layer, h('span', { class: 'ed-pnum' }, `${i + 1} / ${sizes.length}`));
+    const wrap = h('div', { class: 'ed-page', 'data-page': i }, canvas, layer);
     wrap.canvas = canvas; wrap.layer = layer; wrap.rendered = 0;
     pagesEl.append(wrap);
     return wrap;
   });
-  ctx.main.append(bar, pagesEl);
-  ctx.main.classList.add('ed-main');
+
+  // Page thumbnails: click to jump, the current one is marked.
+  const thumbs = h('div', { class: 'ed-thumbs' }, h('p', { class: 'f__label' }, 'Pages'));
+  const thumbBtns = sizes.map((sz, i) => {
+    const c = h('canvas', { class: 'thumb' });
+    renderPage(doc.js, i, 88, { canvas: c }).catch(() => {});
+    const b = h('button', { class: 'ed-thumb', 'aria-label': `Go to page ${i + 1}`, onclick: () => pagesEl.scrollTo({ top: pageEls[i].offsetTop - 16, behavior: 'smooth' }) },
+      h('span', { class: 'ed-thumb__page' }, c), h('span', { class: 'ed-thumb__num' }, String(i + 1).padStart(2, '0')));
+    thumbs.append(b);
+    return b;
+  });
+  const markCurrent = () => {
+    const mid = pagesEl.scrollTop + pagesEl.clientHeight / 3;
+    let cur = 0;
+    pageEls.forEach((p, i) => { if (p.offsetTop <= mid) cur = i; });
+    thumbBtns.forEach((b, i) => b.classList.toggle('on', i === cur));
+    pageLbl.textContent = `Page ${cur + 1} of ${sizes.length}`;
+    if (st.curPage !== cur) { st.curPage = cur; thumbBtns[cur].scrollIntoView({ block: 'nearest' }); }
+  };
+  pagesEl.addEventListener('scroll', () => requestAnimationFrame(markCurrent), { passive: true });
+
+  ctx.main.append(h('div', { class: 'ed-shell' + (sizes.length < 2 ? ' ed-shell--one' : '') }, rail, thumbs, h('div', { class: 'ed-stage' }, top, pagesEl)));
+  setTimeout(markCurrent, 0);
 
   // Draw pages only when they scroll into view.
   const io = new IntersectionObserver((entries) => entries.forEach((en) => {
@@ -147,6 +173,22 @@ async function setupEditor(ctx, signMode) {
   }
   if (signMode) drawSigs();
 
+  // Colour dots plus a "custom" dot that opens the system picker.
+  const swatches = (value, palette, onPick) => {
+    const wrap = h('div', { class: 'dots', role: 'radiogroup', 'aria-label': 'Colour' });
+    const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+    const draw = (v) => wrap.replaceChildren(
+      ...palette.map((c) => h('button', { type: 'button', class: 'dot' + (same(c, v) ? ' on' : ''), style: { background: c }, role: 'radio', 'aria-checked': String(same(c, v)), 'aria-label': c, onclick: () => { onPick(c); draw(c); } })),
+      h('label', { class: 'dot dot--custom' + (palette.some((c) => same(c, v)) ? '' : ' on'), title: 'Custom colour', style: { '--v': v } },
+        h('input', { type: 'color', value: v, 'aria-label': 'Custom colour', oninput: (e) => onPick(e.target.value), onchange: (e) => draw(e.target.value) })));
+    draw(value);
+    return wrap;
+  };
+  const INK = ['#111827', '#6646e8', '#14b8a6', '#f43f5e', '#2563eb', '#9ca3af'];
+  const MARK = ['#fde047', '#86efac', '#93c5fd', '#f9a8d4', '#fdba74'];
+  const PAPER = ['#ffffff', '#f8fafc', '#fef9c3', '#e5e7eb', '#000000'];
+  const field2 = (label, ...control) => h('div', { class: 'f' }, h('span', { class: 'f__label' }, label), ...control);
+
   function drawProps() {
     const o = st.selected && st.objects.find((x) => x.id === st.selected);
     const type = o?.type || ({ text: 'text', date: 'text', draw: 'path', highlight: 'rect', whiteout: 'rect' })[st.tool];
@@ -154,30 +196,37 @@ async function setupEditor(ctx, signMode) {
     if (type === 'text') {
       const t = o || st.text;
       const set = (k, v) => { if (o) { snapshot(); o[k] = v; restyle(o); } st.text[k] = v; };
+      const align = t.align || 'left';
       kids.push(
-        h('p', { class: 'f__label' }, 'Text'),
+        h('h3', { class: 'props__title' }, o?.orig ? 'Text from the PDF' : 'Text properties'),
+        field2('Typeface', h('select', { class: 'field', 'aria-label': 'Typeface', onchange: (e) => set('font', e.target.value) },
+          Object.keys(FONTS).map((f) => h('option', { value: f, selected: f === t.font }, FONTS[f].label)))),
         h('div', { class: 'row2' },
-          h('select', { class: 'field', 'aria-label': 'Font', onchange: (e) => set('font', e.target.value) }, Object.keys(FONTS).map((f) => h('option', { selected: f === t.font }, f))),
-          h('input', { class: 'field', type: 'number', min: 6, max: 144, value: t.size, 'aria-label': 'Size', onchange: (e) => set('size', Math.min(144, Math.max(6, +e.target.value || 14))) })),
-        h('div', { class: 'row2' },
-          h('input', { type: 'color', class: 'swatch', value: t.color, 'aria-label': 'Colour', oninput: (e) => set('color', e.target.value) }),
-          h('button', { class: 'btn btn--ghost' + (t.bold ? ' on' : ''), onclick: (e) => { set('bold', !t.bold); e.currentTarget.classList.toggle('on'); } }, h('b', {}, 'B'), ' Bold')));
+          field2('Font size', h('div', { class: 'unit' }, h('input', { class: 'field', type: 'number', min: 6, max: 144, step: 0.5, value: t.size, 'aria-label': 'Font size', onchange: (e) => set('size', Math.min(144, Math.max(6, +e.target.value || 14))) }), h('span', {}, 'pt'))),
+          field2('Style', h('button', { type: 'button', class: 'btn btn--soft btn--block' + (t.bold ? ' on' : ''), 'aria-pressed': String(!!t.bold), onclick: (e) => { set('bold', !t.bold); e.currentTarget.classList.toggle('on'); } }, h('b', {}, 'B'), 'Bold'))),
+        field2('Text color', swatches(t.color, INK, (c) => set('color', c))),
+        field2('Alignment', h('div', { class: 'seg seg--icons' }, [['left', 'alignLeft', 'Left'], ['center', 'alignCenter', 'Center'], ['right', 'alignRight', 'Right']].map(([v, ic, label]) =>
+          h('button', { type: 'button', class: v === align ? 'on' : '', 'aria-pressed': String(v === align), onclick: () => { set('align', v); drawProps(); } }, icon(ic), label)))));
     } else if (type === 'path') {
       const t = o || st.pen;
-      kids.push(h('p', { class: 'f__label' }, 'Pen'),
-        h('div', { class: 'row2' },
-          h('input', { type: 'color', class: 'swatch', value: t.color, 'aria-label': 'Colour', oninput: (e) => { st.pen.color = e.target.value; if (o) { o.color = e.target.value; restyle(o); } } }),
-          h('select', { class: 'field', 'aria-label': 'Thickness', onchange: (e) => { st.pen.width = +e.target.value; if (o) { o.width = +e.target.value; restyle(o); } } },
-            [[1, 'Thin'], [2, 'Normal'], [4, 'Thick'], [8, 'Marker']].map(([v, l]) => h('option', { value: v, selected: v === t.width }, l)))));
+      kids.push(h('h3', { class: 'props__title' }, 'Pen'),
+        field2('Ink color', swatches(t.color, INK, (c) => { st.pen.color = c; if (o) { o.color = c; restyle(o); } })),
+        field2('Thickness', h('div', { class: 'seg' }, [[1, 'Thin'], [2, 'Normal'], [4, 'Thick'], [8, 'Marker']].map(([v, l]) =>
+          h('button', { type: 'button', class: v === t.width ? 'on' : '', onclick: () => { st.pen.width = v; if (o) { o.width = v; restyle(o); } drawProps(); } }, l)))));
     } else if (type === 'rect') {
       const which = o ? o.kind : st.tool;
-      const t = o || (which === 'highlight' ? st.mark : st.white);
-      kids.push(h('p', { class: 'f__label' }, which === 'highlight' ? 'Highlight' : 'White-out'),
-        h('input', { type: 'color', class: 'swatch', value: t.color, 'aria-label': 'Colour', oninput: (e) => { (which === 'highlight' ? st.mark : st.white).color = e.target.value; if (o) { o.color = e.target.value; restyle(o); } } }),
+      const hl = which === 'highlight';
+      const t = o || (hl ? st.mark : st.white);
+      kids.push(h('h3', { class: 'props__title' }, hl ? 'Highlight' : 'White-out'),
+        field2(hl ? 'Marker color' : 'Cover color', swatches(t.color, hl ? MARK : PAPER, (c) => { (hl ? st.mark : st.white).color = c; if (o) { o.color = c; restyle(o); } })),
         !o && h('p', { class: 'muted small' }, 'Drag across the page to draw the box.'));
+    } else if (o?.type === 'image') {
+      kids.push(h('h3', { class: 'props__title' }, o.kind === 'sig' ? 'Signature' : 'Image'),
+        h('p', { class: 'muted small' }, 'Drag to move it. Drag the corner handle to resize it.'));
     }
-    if (!o && st.tool === 'edittext') kids.push(h('p', { class: 'f__label' }, 'Edit text'), h('p', { class: 'muted small' }, 'Every piece of text in the PDF has a box around it. Click one to type over it, or drag it somewhere else. To delete it, click it and clear the text. Scanned pages have no text to edit.'));
-    if (o) kids.push(h('button', { class: 'btn btn--ghost btn--block danger', onclick: () => remove(o) }, icon('trash'), 'Delete'));
+    if (!o && st.tool === 'edittext') kids.push(h('h3', { class: 'props__title' }, 'Edit text'), h('p', { class: 'muted small' }, 'Every piece of text in the PDF has a box around it. Click one to type over it, or drag it somewhere else. To delete it, click it and clear the text. Scanned pages have no text to edit.'));
+    if (!o && st.tool === 'select' && !signMode) kids.push(h('h3', { class: 'props__title' }, 'Select'), h('p', { class: 'muted small' }, 'Click something you added to move, resize or change it.'));
+    if (o) kids.push(h('button', { class: 'btn btn--soft btn--block danger', onclick: () => remove(o) }, icon('trash'), 'Delete'));
     props.replaceChildren(...kids);
   }
 
@@ -388,7 +437,7 @@ async function setupEditor(ctx, signMode) {
     const el = els.get(o.id);
     if (!el) return;
     if (o.type === 'text') {
-      Object.assign(el.style, { fontFamily: FONTS[o.font].css, fontWeight: o.bold ? '700' : '400', color: o.color });
+      Object.assign(el.style, { fontFamily: FONTS[o.font].css, fontWeight: o.bold ? '700' : '400', color: o.color, textAlign: o.align || 'left' });
       measure(o);
     } else if (o.type === 'rect') el.style.background = o.color;
     else if (o.type === 'path') {
@@ -541,7 +590,7 @@ async function setupEditor(ctx, signMode) {
       e.preventDefault();
       const t = st.text;
       const text = st.tool === 'date' ? new Date().toLocaleDateString() : '';
-      const o = add({ type: 'text', page, text, font: t.font, size: t.size, color: t.color, bold: t.bold, x: p.x, y: p.y - (t.size * LH) / 2 });
+      const o = add({ type: 'text', page, text, font: t.font, size: t.size, color: t.color, bold: t.bold, align: t.align, x: p.x, y: p.y - (t.size * LH) / 2 });
       if (st.tool === 'date') { measure(o); select(o.id); }
       else setTimeout(() => editText(o), 0);
       st.tool = 'select';
@@ -706,13 +755,16 @@ async function saveEditor(ctx) {
       const fnt = await font(o.font, o.bold);
       const lines = o.text.split('\n');
       if (lines.every((l) => fontCanDraw(fnt, l))) {
+        const widths = lines.map((l) => fnt.widthOfTextAtSize(l, o.size));
+        const box = Math.max(...widths);
         lines.forEach((line, i) => {
           if (!line) return;
-          const q = f.map(X, Y + (i * LH + FONTS[o.font].base) * o.size);
+          const dx = o.align === 'center' ? (box - widths[i]) / 2 : o.align === 'right' ? box - widths[i] : 0;
+          const q = f.map(X + dx, Y + (i * LH + FONTS[o.font].base) * o.size);
           page.drawText(line, { x: q.x, y: q.y, size: o.size, font: fnt, color: hexToRgb(o.color), rotate: rot });
         });
       } else {
-        const png = await textAsPng(o.text, { family: FONTS[o.font].css, bold: o.bold, size: o.size, color: o.color, lineHeight: LH });
+        const png = await textAsPng(o.text, { family: FONTS[o.font].css, bold: o.bold, size: o.size, color: o.color, lineHeight: LH, align: o.align });
         const emb = await lib.embedPng(png.bytes);
         const a = boxAnchor(f, X + png.width / 2, Y + png.height / 2, png.width, png.height);
         page.drawImage(emb, { x: a.x, y: a.y, width: png.width, height: png.height, rotate: a.rotate });

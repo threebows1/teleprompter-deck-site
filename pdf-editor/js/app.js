@@ -1,63 +1,226 @@
-// The tool grid and the shell every tool runs in: pick files -> work -> download.
-import { h, icon, busy, toast, tick, openPdf, isPdf, isImage, pickFiles, download, fmtSize } from './core.js';
+// Pages: home (hero + every tool), the workspace (recent files, favourites)
+// and the shell every tool runs in: pick files -> work -> download.
+import { h, icon, busy, toast, tick, openPdf, isPdf, isImage, pickFiles, download, fmtSize, modal } from './core.js';
 import { TOOLS, CATEGORIES } from './tools.js';
+import { listDocs, getDoc, deleteDoc, saveDoc, usedBytes, LIMIT, keepCopies, setKeepCopies, favorites, toggleFavorite } from './store.js';
 
 const app = document.getElementById('app');
+const toolById = (id) => TOOLS.find((t) => t.id === id);
+
+// Files handed to a tool from the workspace ("Open in…").
+let pending = null;
 
 function route() {
-  const id = location.hash.slice(1);
-  const tool = TOOLS.find((t) => t.id === id);
-  window.scrollTo(0, 0);
-  if (tool) showTool(tool);
-  else showHome();
+  const [id, sub] = location.hash.slice(1).split('/');
+  const tool = toolById(id);
+  dropHandler = null;
+  document.body.classList.remove('has-bar');
+  document.querySelectorAll('[data-nav]').forEach((a) => a.toggleAttribute('aria-current', a.dataset.nav === (tool ? 'tools' : id || 'home')));
+  if (tool) { window.scrollTo(0, 0); showTool(tool); return; }
+  if (id === 'workspace') { window.scrollTo(0, 0); showWorkspace(sub || 'overview'); return; }
+  showHome();
+  if (id === 'tools') requestAnimationFrame(() => document.getElementById('all-tools')?.scrollIntoView({ behavior: 'smooth' }));
+  else window.scrollTo(0, 0);
 }
 window.addEventListener('hashchange', route);
 document.querySelector('[data-home]').addEventListener('click', (e) => {
   if (location.hash) { e.preventDefault(); location.hash = ''; }
 });
 
-/* ---------- home ---------- */
+/* ---------- home: hero (concept 01) + tool collection (concept 04) ---------- */
 
 let filter = 'all';
+let query = '';
+
 function showHome() {
-  dropHandler = null;
   document.title = 'PDF Tools · My Second Wish';
-  document.body.classList.remove('has-bar');
+  const hero = h('section', { class: 'hero card-lg' },
+    h('div', { class: 'hero__text' },
+      h('p', { class: 'pill' }, 'Free · Private · In your browser'),
+      h('h1', {}, 'Every document.', h('br'), h('span', { class: 'accent' }, 'Beautifully simple.')),
+      h('p', { class: 'hero__lead' }, 'Edit, convert, organize and sign PDFs in one calm workspace. Your files never leave your device.'),
+      h('div', { class: 'hero__cta' },
+        h('a', { class: 'btn btn--solid btn--big', href: '#workspace' }, 'Start working', icon('arrow')),
+        h('a', { class: 'btn btn--soft btn--big', href: '#tools' }, 'Explore tools'))),
+    h('div', { class: 'hero__art', 'aria-hidden': 'true' },
+      h('div', { class: 'art__frame' },
+        h('div', { class: 'art__doc' },
+          h('i', { class: 'l l--a' }), h('i', { class: 'l l--b' }),
+          h('div', { class: 'art__block' }, h('i', { class: 'l l--c' }), h('i', { class: 'l l--d' }), h('i', { class: 'l l--e' })),
+          h('i', { class: 'l l--f' }), h('i', { class: 'l l--g' })),
+        h('span', { class: 'art__chip art__chip--pdf' }, 'PDF', icon('plus')),
+        h('span', { class: 'art__chip art__chip--edit' }, 'EDIT'),
+        h('span', { class: 'art__sig' }, icon('sign')))),
+    h('div', { class: 'hero__perks' },
+      [['shield', 'Private by design', 'Nothing is uploaded'], ['bolt', 'Built for speed', 'Starts the moment you pick a file'], ['heart', 'One seamless flow', 'Free, no account, no watermark']]
+        .map(([ic, t, s]) => h('div', { class: 'perk' }, h('span', { class: 'perk__icon' }, icon(ic)), h('div', {}, h('strong', {}, t), h('span', {}, s))))));
+
   const grid = h('div', { class: 'tools' });
+  const empty = h('p', { class: 'empty', hidden: true }, 'No tool matches that. Try “merge”, “sign” or “jpg”.');
   const fill = () => {
-    grid.replaceChildren(...TOOLS.filter((t) => filter === 'all' || t.cat === filter).map((t) =>
-      h('a', { class: 'tile', href: '#' + t.id, style: { '--c': t.color } },
-        h('span', { class: 'tile__icon' }, icon(t.icon)),
-        h('strong', {}, t.title),
-        h('span', { class: 'tile__desc' }, t.desc),
-        h('span', { class: 'tile__go', 'aria-hidden': 'true' }, icon('arrow')))));
+    const q = query.trim().toLowerCase();
+    const list = TOOLS.filter((t) => (filter === 'all' || t.cat === filter || (filter === 'favs' && favorites().includes(t.id)))
+      && (!q || `${t.title} ${t.desc} ${t.cat} ${t.keywords || ''}`.toLowerCase().includes(q)));
+    grid.replaceChildren(...list.map(tile));
+    empty.hidden = list.length > 0;
   };
+  const search = h('input', { class: 'search__input', type: 'search', placeholder: 'Search tools, formats or actions…', 'aria-label': 'Search tools', value: query, oninput: (e) => { query = e.target.value; fill(); } });
   const chips = h('div', { class: 'chips', role: 'tablist' },
-    [['all', 'All'], ...CATEGORIES].map(([id, label]) =>
+    [['all', 'All'], ['favs', '★ Favorites'], ...CATEGORIES].map(([id, label]) =>
       h('button', {
         class: 'chip' + (filter === id ? ' on' : ''), role: 'tab', 'aria-selected': String(filter === id),
         onclick: (e) => { filter = id; chips.querySelectorAll('.chip').forEach((c) => { c.classList.toggle('on', c === e.currentTarget); c.setAttribute('aria-selected', String(c === e.currentTarget)); }); fill(); },
       }, label)));
   fill();
+  app.replaceChildren(hero,
+    h('section', { class: 'collection', id: 'all-tools' },
+      h('div', { class: 'section-head' }, h('h2', {}, 'Everything your PDF needs'), h('p', {}, `${TOOLS.length} tools, all free, all on your device.`)),
+      h('form', { class: 'search', role: 'search', onsubmit: (e) => { e.preventDefault(); const first = grid.querySelector('.tile'); if (first) location.hash = first.getAttribute('href'); } },
+        icon('search'), search, h('button', { class: 'btn btn--solid', type: 'submit' }, 'Search')),
+      chips, grid, empty));
+}
+
+function tile(t) {
+  const fav = favorites().includes(t.id);
+  const star = h('button', {
+    class: 'star' + (fav ? ' on' : ''), type: 'button', title: fav ? 'Remove from favorites' : 'Add to favorites', 'aria-label': `Favorite ${t.title}`, 'aria-pressed': String(fav),
+    onclick: (e) => { e.preventDefault(); e.stopPropagation(); const on = toggleFavorite(t.id); star.classList.toggle('on', on); star.setAttribute('aria-pressed', String(on)); },
+  }, icon('star'));
+  return h('a', { class: 'tile', href: '#' + t.id, style: { '--c': t.color } },
+    h('span', { class: 'tile__icon' }, icon(t.icon)),
+    h('strong', {}, t.title),
+    h('span', { class: 'tile__desc' }, t.desc),
+    star);
+}
+
+/* ---------- workspace (concept 02) ---------- */
+
+const NAV = [['overview', 'grid', 'Overview'], ['tools', 'pages', 'All tools'], ['docs', 'file', 'My documents'], ['favs', 'star', 'Favorites']];
+const QUICK = [['edit', 'Make changes'], ['pdf-to-jpg', 'Change format'], ['merge', 'Combine files'], ['compress', 'Save space']];
+
+async function showWorkspace(view) {
+  document.title = 'Workspace · PDF Tools';
+  const storage = h('div', { class: 'storage' });
+  const side = h('aside', { class: 'ws-nav' },
+    h('nav', {}, NAV.map(([id, ic, label]) => h('a', { class: 'ws-link' + (view === id ? ' on' : ''), href: '#workspace/' + id }, icon(ic), label))),
+    storage);
+  const body = h('div', { class: 'ws-body' });
   app.replaceChildren(
-    h('section', { class: 'hero' },
-      h('p', { class: 'eyebrow' }, 'Free · No sign-up · Nothing uploaded'),
-      h('h1', {}, 'Every PDF tool, ', h('span', { class: 'grad' }, 'right in your browser.')),
-      h('p', {}, 'Merge, split, compress, edit and sign PDFs, and convert them to and from images. Your files stay on your device: everything runs here, in this page.')),
-    chips, grid,
-    h('section', { class: 'perks', 'aria-label': 'Why PDF Tools' },
-      [['shield', 'Private by design', 'Files are opened and changed inside your browser. They are never uploaded, so nobody else can see them.'],
-        ['bolt', 'Fast, even on big files', 'No waiting for uploads or downloads from a server. Work starts the moment you pick a file.'],
-        ['heart', 'Free, no account', 'No sign-up, no watermark on your files, no limit on how many you do.']]
-        .map(([ic, title, text]) => h('div', { class: 'perk' }, h('span', { class: 'perk__icon' }, icon(ic)), h('div', {}, h('strong', {}, title), h('p', {}, text))))));
+    h('div', { class: 'page-head' }, h('h1', {}, 'Your workspace'), h('p', { class: 'crumbs' }, h('a', { href: '#' }, 'Home'), ' / ', view === 'overview' ? 'Overview' : NAV.find((n) => n[0] === view)?.[2])),
+    h('div', { class: 'ws' }, side, body));
+
+  const drawStorage = async () => {
+    const used = await usedBytes();
+    storage.replaceChildren(
+      h('p', { class: 'storage__label' }, 'Storage on this device'),
+      h('strong', {}, `${fmtSize(used)} of ${fmtSize(LIMIT)}`),
+      h('div', { class: 'meter' }, h('span', { style: { width: Math.max(2, Math.min(100, (used / LIMIT) * 100)) + '%' } })),
+      h('label', { class: 'check check--dark' }, h('input', { type: 'checkbox', checked: keepCopies(), onchange: (e) => setKeepCopies(e.target.checked) }), h('span', {}, 'Keep finished files here')));
+  };
+  drawStorage();
+
+  const docsCard = async (limit) => {
+    const docs = await listDocs();
+    const shown = limit ? docs.slice(0, limit) : docs;
+    const card = h('section', { class: 'card-lg docs' },
+      h('div', { class: 'docs__head' }, h('h2', {}, limit ? 'Recent documents' : 'My documents'),
+        limit && docs.length > limit ? h('a', { class: 'linkbtn', href: '#workspace/docs' }, 'View all', icon('arrow')) : null));
+    if (!shown.length) {
+      card.append(h('div', { class: 'docs__empty' }, h('span', { class: 'docs__icon' }, icon('file')),
+        h('p', {}, 'Files you upload here, and files you finish in any tool, show up in this list. They are kept only in this browser.')));
+      return card;
+    }
+    card.append(h('ul', { class: 'docs__list' }, shown.map((d) => docRow(d, async () => { await deleteDoc(d.id); drawStorage(); render(); }))));
+    return card;
+  };
+
+  const upload = async () => {
+    const files = (await pickFiles({ accept: 'application/pdf,.pdf,image/*', multiple: true })).filter((f) => isPdf(f) || isImage(f));
+    if (!files.length) return;
+    for (const f of files) await saveDoc({ name: f.name, bytes: f, type: f.type, tool: 'upload' });
+    drawStorage();
+    await render();
+    if (files.length === 1) chooseTool(files[0]);
+    else toast(`${files.length} files added to My documents.`);
+  };
+
+  const render = async () => {
+    if (view === 'docs') { body.replaceChildren(await docsCard(0)); return; }
+    if (view === 'tools' || view === 'favs') {
+      const list = view === 'favs' ? TOOLS.filter((t) => favorites().includes(t.id)) : TOOLS;
+      body.replaceChildren(h('section', {},
+        h('div', { class: 'tools tools--ws' }, list.map(tile)),
+        view === 'favs' && h('p', { class: 'muted small ws-hint' }, 'Tap the star on any tool to add it here.')));
+      return;
+    }
+    body.replaceChildren(
+      h('section', { class: 'welcome' },
+        h('div', {}, h('h2', {}, 'Welcome back.'), h('p', {}, 'What would you like to do today?')),
+        h('button', { class: 'btn btn--solid btn--big', onclick: upload }, icon('plus'), 'Upload a PDF')),
+      h('div', { class: 'quick' }, QUICK.map(([id, sub]) => {
+        const t = toolById(id);
+        return h('a', { class: 'quick__card', href: '#' + id, style: { '--c': t.color } }, h('span', { class: 'tile__icon' }, icon(t.icon)), h('strong', {}, t.title.replace(' to JPG', ' → JPG')), h('span', {}, sub));
+      })),
+      await docsCard(5));
+  };
+  await render();
+}
+
+function docRow(d, onDelete) {
+  const isImg = !/pdf/i.test(d.type);
+  const open = async (toolId) => {
+    const rec = await getDoc(d.id);
+    if (!rec) return toast('That file is no longer here.', 'bad');
+    pending = { tool: toolId, files: [new File([rec.blob], rec.name, { type: rec.type })] };
+    location.hash = toolId;
+  };
+  const choices = TOOLS.filter((t) => (isImg ? t.accept === 'image' : t.accept !== 'image'));
+  return h('li', { class: 'doc' },
+    h('span', { class: 'doc__icon' + (isImg ? ' doc__icon--img' : '') }, isImg ? 'IMG' : 'PDF'),
+    h('div', { class: 'doc__meta' }, h('strong', { title: d.name }, d.name),
+      h('span', {}, `${when(d.added)} · ${fmtSize(d.size)}${d.tool && d.tool !== 'upload' ? ' · ' + (toolById(d.tool)?.title || '') : ''}`)),
+    h('select', { class: 'field doc__open', 'aria-label': `Open ${d.name} in a tool`, onchange: (e) => e.target.value && open(e.target.value) },
+      h('option', { value: '' }, 'Open in…'), choices.map((t) => h('option', { value: t.id }, t.title))),
+    h('button', { class: 'iconbtn', title: 'Download', 'aria-label': `Download ${d.name}`, onclick: async () => { const r = await getDoc(d.id); if (r) download(r.blob, r.name, r.type); } }, icon('download')),
+    h('button', { class: 'iconbtn', title: 'Delete', 'aria-label': `Delete ${d.name}`, onclick: onDelete }, icon('trash')));
+}
+
+function when(ts) {
+  const d = new Date(ts), now = new Date();
+  const day = 864e5;
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (ts >= startToday) return 'Today, ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (ts >= startToday - day) return 'Yesterday';
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+async function chooseTool(file) {
+  const img = isImage(file);
+  const picked = await modal({
+    title: `What should we do with “${file.name}”?`,
+    wide: true,
+    cancelText: 'Later',
+    okText: 'Open',
+    body: (m) => {
+      let choice = img ? 'jpg-to-pdf' : 'edit';
+      m.value = () => choice;
+      const g = h('div', { class: 'pick' }, TOOLS.filter((t) => (img ? t.accept === 'image' : t.accept !== 'image')).map((t) =>
+        h('button', { type: 'button', class: 'pick__item' + (t.id === choice ? ' on' : ''), style: { '--c': t.color }, onclick: (e) => { choice = t.id; g.querySelectorAll('.pick__item').forEach((b) => b.classList.toggle('on', b === e.currentTarget)); }, ondblclick: () => m.ok() },
+          h('span', { class: 'tile__icon' }, icon(t.icon)), h('span', {}, t.title))));
+      return [h('p', {}, 'It is saved in My documents. Pick a tool to open it now.'), g];
+    },
+  });
+  if (!picked) return;
+  pending = { tool: picked, files: [file] };
+  location.hash = picked;
 }
 
 /* ---------- one tool ---------- */
 
 function showTool(tool) {
   document.title = `${tool.title} · PDF Tools`;
-  const head = h('div', { class: 'tool__head', style: { '--c': tool.color } },
-    h('a', { class: 'back', href: '#' }, icon('back'), 'All tools'),
+  const head = h('div', { class: 'page-head tool__head', style: { '--c': tool.color } },
+    h('p', { class: 'crumbs' }, h('a', { href: '#tools' }, 'All tools'), ' / ', tool.title),
     h('div', { class: 'tool__title' },
       h('span', { class: 'tile__icon' }, icon(tool.icon)),
       h('h1', {}, tool.title),
@@ -81,14 +244,19 @@ function showDrop(tool, body) {
   };
   const img = tool.accept === 'image';
   const zone = h('div', { class: 'drop' },
-    h('span', { class: 'drop__icon', 'aria-hidden': 'true' }, icon(img ? 'image' : 'file')),
-    h('button', { class: 'btn btn--solid btn--big', onclick: pick }, icon('upload'),
-      img ? (tool.multiple ? 'Select images' : 'Select image') : (tool.multiple ? 'Select PDF files' : 'Select PDF file')),
-    h('p', { class: 'drop__or' }, img ? 'or drop images here' : 'or drop PDFs here'),
-    h('p', { class: 'drop__note' }, icon('shield'), img ? 'JPG, PNG or WebP · opened on this device, never uploaded' : 'Opened on this device, never uploaded'));
-  dropTarget(zone, onFiles);
+    h('span', { class: 'drop__icon', 'aria-hidden': 'true' }, icon(img ? 'image' : 'upload')),
+    h('h2', { class: 'drop__title' }, img ? (tool.multiple ? 'Choose your images' : 'Choose an image') : (tool.multiple ? 'Choose your PDF files' : 'Choose a PDF file')),
+    h('p', { class: 'drop__or' }, img ? 'Drag and drop JPG, PNG or WebP images here, or' : 'Drag and drop here, or'),
+    h('button', { class: 'btn btn--solid btn--big', onclick: pick }, icon('plus'), img ? 'Select images' : (tool.multiple ? 'Select PDF files' : 'Select PDF file')),
+    h('p', { class: 'drop__note' }, icon('shield'), 'Opened on this device, never uploaded'));
+  dropHandler = onFiles;
   document.body.classList.remove('has-bar');
   body.replaceChildren(zone);
+  if (pending && pending.tool === tool.id) {
+    const files = pending.files;
+    pending = null;
+    onFiles(files);
+  }
 }
 
 async function openAll(tool, files) {
@@ -102,7 +270,6 @@ async function openAll(tool, files) {
     } catch (err) {
       busy(false);
       if (err.message !== 'cancelled') toast(err.message, 'bad');
-      busy(files.length > 1 ? 'Opening…' : 'Opening…');
     }
   }
   busy(false);
@@ -119,7 +286,6 @@ window.addEventListener('drop', (e) => {
   e.preventDefault();
   dropHandler([...e.dataTransfer.files]);
 });
-function dropTarget(_zone, fn) { dropHandler = fn; }
 
 function startWork(tool, body, items) {
   const main = h('div', { class: 'work__main' });
@@ -128,7 +294,7 @@ function startWork(tool, body, items) {
   for (const el of [main, side]) el.append = (...kids) => Element.prototype.append.apply(el, kids.filter((k) => k != null && k !== false));
   const action = h('button', { class: 'btn btn--solid btn--big btn--block' }, tool.action || tool.title, icon('arrow'));
   const sideWrap = h('div', { class: 'work__sidewrap' },
-    h('div', { class: 'work__sidehead' }, h('h2', {}, 'Options'),
+    h('div', { class: 'work__sidehead' }, h('h2', {}, tool.editor ? (tool.id === 'sign' ? 'Signature' : 'Properties') : 'Options'),
       h('button', { class: 'linkbtn', onclick: () => showDrop(tool, body) }, tool.multiple ? 'Start over' : 'Change file')),
     side,
     h('div', { class: 'work__go' }, action));
@@ -165,7 +331,6 @@ function startWork(tool, body, items) {
   tool.setup(ctx);
 }
 
-// result: { files: [{ name, bytes, type? }], note?, zipName? }
 // What people usually do next, iLovePDF-style.
 const NEXT = {
   merge: ['compress', 'organize', 'page-numbers', 'protect'],
@@ -176,11 +341,12 @@ const NEXT = {
 };
 const FALLBACK = ['compress', 'merge', 'edit', 'sign', 'protect', 'split'];
 
+// result: { files: [{ name, bytes, type? }], note?, zipName?, title? }
 function showDone(tool, body, result) {
   dropHandler = null;
   document.body.classList.remove('has-bar');
   window.scrollTo({ top: 0, behavior: 'smooth' });
-  const next = (NEXT[tool.id] || FALLBACK).filter((id) => id !== tool.id).slice(0, 4).map((id) => TOOLS.find((t) => t.id === id)).filter(Boolean);
+  const next = (NEXT[tool.id] || FALLBACK).filter((id) => id !== tool.id).slice(0, 4).map(toolById).filter(Boolean);
   const files = result.files;
   const save = async () => {
     if (files.length === 1) return download(files[0].bytes, files[0].name, files[0].type);
@@ -192,19 +358,28 @@ function showDone(tool, body, result) {
     download(blob, result.zipName || 'pdf-tools.zip', 'application/zip');
   };
   const total = files.reduce((s, f) => s + (f.bytes.byteLength ?? f.bytes.size ?? 0), 0);
+  const kept = h('p', { class: 'done__kept', hidden: true });
+  if (keepCopies() && files.length <= 20) {
+    Promise.all(files.map((f) => saveDoc({ name: f.name, bytes: f.bytes, type: f.type, tool: tool.id }))).then((ids) => {
+      if (!ids.every(Boolean)) return;
+      kept.hidden = false;
+      kept.replaceChildren(icon('check'), 'Saved to ', h('a', { href: '#workspace/docs' }, 'My documents'), ' on this device.');
+    });
+  }
   const list = files.length > 1 && h('ul', { class: 'done__list' }, files.slice(0, 50).map((f) =>
     h('li', {}, h('span', {}, f.name), h('button', { class: 'linkbtn', onclick: () => download(f.bytes, f.name, f.type) }, 'Download'))));
-  body.replaceChildren(h('div', { class: 'done' },
+  body.replaceChildren(h('div', { class: 'done card-lg' },
     h('span', { class: 'done__check' }, icon('check')),
     h('h2', {}, result.title || 'Your file is ready'),
     result.note && h('p', { class: 'done__note' }, result.note),
     h('button', { class: 'btn btn--solid btn--big', onclick: save }, icon('download'),
       files.length === 1 ? `Download ${files[0].name.split('.').pop().toUpperCase()}` : `Download all (${files.length}) as ZIP`),
     h('p', { class: 'muted' }, files.length === 1 ? `${files[0].name} · ${fmtSize(total)}` : fmtSize(total)),
+    kept,
     list,
     h('div', { class: 'done__more' },
-      h('button', { class: 'btn btn--ghost', onclick: () => showDrop(tool, body) }, icon('rotateLeft'), 'Do another'),
-      h('a', { class: 'btn btn--ghost', href: '#' }, icon('grid'), 'All tools')),
+      h('button', { class: 'btn btn--soft', onclick: () => showDrop(tool, body) }, icon('rotateLeft'), 'Do another'),
+      h('a', { class: 'btn btn--soft', href: '#workspace' }, icon('grid'), 'Workspace')),
     h('div', { class: 'done__next' },
       h('p', { class: 'f__label' }, 'Continue with'),
       h('div', { class: 'nexts' }, next.map((t) => h('a', { class: 'next', href: '#' + t.id, style: { '--c': t.color } },

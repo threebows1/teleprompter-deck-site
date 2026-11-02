@@ -61,6 +61,12 @@ export const ICONS = {
   check: svg('<path d="M20 6 9 17l-5-5"/>'),
   shield: svg('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>'),
   arrow: svg('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>'),
+  search: svg('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'),
+  star: svg('<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>'),
+  alignLeft: svg('<path d="M4 6h16M4 10h10M4 14h16M4 18h10"/>'),
+  alignCenter: svg('<path d="M4 6h16M7 10h10M4 14h16M7 18h10"/>'),
+  alignRight: svg('<path d="M4 6h16M10 10h10M4 14h16M10 18h10"/>'),
+  pages: svg('<rect x="7" y="3" width="13" height="16" rx="2"/><path d="M4 7v12a2 2 0 0 0 2 2h10"/>'),
   file: svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/>'),
   bolt: svg('<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>'),
   heart: svg('<path d="M12 21s-7.5-4.6-9.5-9.3C1.2 8.4 3.3 5 6.8 5c2 0 3.6 1.1 5.2 3 1.6-1.9 3.2-3 5.2-3 3.5 0 5.6 3.4 4.3 6.7C19.5 16.4 12 21 12 21Z"/>'),
@@ -318,7 +324,7 @@ export function fontCanDraw(font, text) {
   return true;
 }
 
-export async function textAsPng(text, { family = 'Helvetica, Arial, sans-serif', bold = false, italic = false, size = 24, color = '#000', lineHeight = 1.25 }) {
+export async function textAsPng(text, { family = 'Helvetica, Arial, sans-serif', bold = false, italic = false, size = 24, color = '#000', lineHeight = 1.25, align = 'left' }) {
   const px = size * 4; // 4x for crisp print
   const font = `${italic ? 'italic ' : ''}${bold ? '700 ' : '400 '}${px}px ${family}`;
   const c = document.createElement('canvas');
@@ -333,7 +339,9 @@ export async function textAsPng(text, { family = 'Helvetica, Arial, sans-serif',
   ctx.fillStyle = color;
   ctx.textBaseline = 'middle';
   ctx.direction = 'inherit';
-  lines.forEach((l, i) => ctx.fillText(l, px * 0.1, i * lh + lh / 2));
+  ctx.textAlign = align === 'center' ? 'center' : align === 'right' ? 'right' : 'left';
+  const ax = align === 'center' ? c.width / 2 : align === 'right' ? c.width - px * 0.1 : px * 0.1;
+  lines.forEach((l, i) => ctx.fillText(l, ax, i * lh + lh / 2));
   const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
   return { bytes: new Uint8Array(await blob.arrayBuffer()), width: c.width / 4, height: c.height / 4 };
 }
