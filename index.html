@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Apps · My Second Wish</title>
-<meta name="description" content="Android apps and Chrome extensions by My Second Wish: Teleprompter Deck, DimLock, SignVel, Responsive Lens and Wa SenderVel.">
+<meta name="description" content="Android apps, Chrome extensions and web tools by My Second Wish: Teleprompter Deck, DimLock, SignVel, Responsive Lens, Wa SenderVel and PDF Tools.">
 <meta property="og:title" content="Apps · My Second Wish">
 <meta property="og:description" content="Android apps and Chrome extensions by My Second Wish.">
 <meta property="og:image" content="https://apps.mysecondwish.com/icon-512.png">
@@ -126,6 +126,7 @@
   .card--blue { --c: var(--blue); }
   .card--green { --c: var(--green); }
   .card--teal { --c: #14c9a0; }
+  .card--red { --c: #ff6b5e; }
 
   .card__top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
   .card__icon {
@@ -215,6 +216,7 @@
     <nav class="jump" aria-label="Sections">
       <a href="#android">Android apps <span class="count">3</span></a>
       <a href="#extensions">Chrome extensions <span class="count">2</span></a>
+      <a href="#web">Web tools <span class="count">1</span></a>
     </nav>
   </section>
 
@@ -320,6 +322,35 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><path d="M21.17 8H12M3.95 6.06 8.54 14M10.88 21.94 15.46 14"/></svg>
             Add to Chrome</a>
           <span class="links"><a href="/wa-sendervel/privacy/">Privacy</a><a href="/wa-sendervel/support/">Support</a></span>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="group" id="web" aria-labelledby="web-title">
+    <div class="group__head">
+      <span class="group__icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c2.6 2.8 3.9 6 3.9 9.5s-1.3 6.7-3.9 9.5c-2.6-2.8-3.9-6-3.9-9.5s1.3-6.7 3.9-9.5Z"/></svg>
+      </span>
+      <div>
+        <h2 id="web-title">Web tools</h2>
+        <p>Free, in your browser</p>
+      </div>
+    </div>
+
+    <div class="grid">
+      <article class="card card--red">
+        <div class="card__top">
+          <div class="card__icon"><img src="/pdf-editor/icon-512.png" alt="" width="512" height="512"></div>
+          <div class="badges"><span class="badge">Web</span><span class="badge badge--live">Free</span></div>
+        </div>
+        <p class="tagline">MERGE. EDIT. SIGN.</p>
+        <h3><a href="/pdf-editor/">PDF Tools</a></h3>
+        <p class="desc">Merge, split, compress, edit and sign PDFs, convert them to and from images, and add or remove a password. Everything runs in your browser, so your files are never uploaded.</p>
+        <div class="actions">
+          <a class="btn btn--solid" href="/pdf-editor/">Open PDF Tools
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+          <span class="links"><a href="/pdf-editor/privacy/">Privacy</a></span>
         </div>
       </article>
     </div>

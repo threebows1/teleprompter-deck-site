@@ -11,6 +11,7 @@ to be reachable at a public URL.
 | `signvel/` | SignVel (Android, `com.mysecondwish.signvel`) | privacy, terms, support |
 | `responsive-lens/` | Responsive Lens (Chrome extension) | privacy, support |
 | `wa-sendervel/` | Wa SenderVel (Chrome extension) | privacy, support |
+| `pdf-editor/` | PDF Tools (web app, runs in the browser) | the app itself, privacy |
 
 `style.css` is shared. Each app's pages set their own `--accent` colour.
 `app-ads.txt` at the root lists the AdMob publisher IDs: pub-3748438999340132 is the current account (SignVel); pub-6821159100234374 is the earlier, rejected account, kept until no app uses it.
