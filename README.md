@@ -11,6 +11,7 @@ to be reachable at a public URL.
 | `signvel/` | SignVel (Android, `com.mysecondwish.signvel`) | privacy, terms, support |
 | `responsive-lens/` | Responsive Lens (Chrome extension) | privacy, support |
 | `wa-sendervel/` | Wa SenderVel (Chrome extension) | privacy, support |
+| `abc-tracing/` | ABC Letter Tracing 123 (Android, for children) | privacy, terms |
 | `pdf-editor/` | PDF Tools (web app, runs in the browser) | the app itself, privacy |
 
 `style.css` is shared. Each app's pages set their own `--accent` colour.
