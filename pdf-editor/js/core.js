@@ -21,6 +21,11 @@ export function h(tag, attrs = {}, ...kids) {
   return el;
 }
 
+// Tool modules add their own icons: registerIcons({ name: '<path …/>' }) (24×24, stroke).
+export function registerIcons(map) {
+  for (const [k, body] of Object.entries(map)) ICONS[k] = svg(body);
+}
+
 export function icon(name) {
   const span = document.createElement('span');
   span.className = 'ic';
@@ -72,6 +77,24 @@ export const ICONS = {
   heart: svg('<path d="M12 21s-7.5-4.6-9.5-9.3C1.2 8.4 3.3 5 6.8 5c2 0 3.6 1.1 5.2 3 1.6-1.9 3.2-3 5.2-3 3.5 0 5.6 3.4 4.3 6.7C19.5 16.4 12 21 12 21Z"/>'),
   grid: svg('<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>'),
 };
+
+/* ---------- loading libraries on demand ---------- */
+
+// Big libraries load only when a tool needs them. Paths are relative to the
+// site root (e.g. 'vendor/tesseract/tesseract.min.js'); each loads once.
+const scripts = new Map();
+export function loadScript(src) {
+  if (!scripts.has(src)) {
+    scripts.set(src, new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = new URL('../' + src, import.meta.url).href;
+      s.onload = resolve;
+      s.onerror = () => { scripts.delete(src); reject(new Error('Could not load a part of PDF Tools. Check your connection and try again.')); };
+      document.head.append(s);
+    }));
+  }
+  return scripts.get(src);
+}
 
 /* ---------- busy overlay + toast ---------- */
 

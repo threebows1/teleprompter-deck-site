@@ -4,128 +4,16 @@ import {
   parseRanges, pageFrame, boxAnchor, fontCanDraw, textAsPng, hexToRgb, imageForPdf, sortable, uid, pickFiles,
 } from './core.js';
 import { editorTool } from './editor.js';
+import {
+  field, segmented, choiceCards, check, slider, debounce, fileHero, fileRow, GROUP_COLORS, fileCard, pageGrid, pdfOut, previewInto, singlePage, previewPane,
+} from './ui.js';
+import { ORGANIZE_MORE } from './more/organize.js';
+import { SECURITY_MORE } from './more/security.js';
+import { TO_PDF } from './more/to-pdf.js';
+import { FROM_PDF } from './more/from-pdf.js';
+import { SMART } from './more/smart.js';
 
-export const CATEGORIES = [['organize', 'Organize'], ['optimize', 'Optimize'], ['convert', 'Convert'], ['edit', 'Edit'], ['security', 'Security']];
-
-/* ---------- small form controls ---------- */
-
-const field = (label, ...control) => h('label', { class: 'f' }, h('span', { class: 'f__label' }, label), ...control);
-
-function segmented(options, value, onChange) {
-  const el = h('div', { class: 'seg', role: 'radiogroup' });
-  const draw = () => el.replaceChildren(...options.map(([v, label]) =>
-    h('button', { type: 'button', role: 'radio', 'aria-checked': String(v === value), class: v === value ? 'on' : '', onclick: () => { value = v; draw(); onChange(v); } }, label)));
-  draw();
-  return el;
-}
-
-function choiceCards(options, value, onChange) {
-  const el = h('div', { class: 'choices' });
-  const draw = () => el.replaceChildren(...options.map(([v, title, sub]) =>
-    h('button', { type: 'button', class: 'choice' + (v === value ? ' on' : ''), onclick: () => { value = v; draw(); onChange(v); } },
-      h('strong', {}, title), sub && h('span', {}, sub))));
-  draw();
-  return el;
-}
-
-const check = (label, checked, onChange) =>
-  h('label', { class: 'check' }, h('input', { type: 'checkbox', checked, onchange: (e) => onChange(e.target.checked) }), h('span', {}, label));
-
-function slider(min, max, step, value, fmt, onInput) {
-  const out = h('output', {}, fmt(value));
-  const input = h('input', { type: 'range', min, max, step, value, oninput: (e) => { out.textContent = fmt(+e.target.value); onInput(+e.target.value); } });
-  return h('div', { class: 'slider' }, input, out);
-}
-
-const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
-
-/* ---------- shared views ---------- */
-
-// One card per PDF, with its first page. Used by tools that take whole files.
-// The one file a single-file tool works on, large and centred.
-function fileHero(doc) {
-  const canvas = h('canvas', { class: 'thumb' });
-  renderPage(doc.js, 0, 220, { canvas }).catch(() => {});
-  return h('div', { class: 'hero-file' },
-    h('div', { class: 'hero-file__page' }, canvas),
-    h('strong', { title: doc.name }, doc.name),
-    h('span', {}, `${doc.pages} page${doc.pages > 1 ? 's' : ''} · ${fmtSize(doc.size)}`));
-}
-
-// A compact line for the file, for sidebars.
-function fileRow(doc) {
-  const canvas = h('canvas', { class: 'thumb' });
-  renderPage(doc.js, 0, 44, { canvas }).catch(() => {});
-  return h('div', { class: 'file-row' }, h('div', { class: 'file-row__page' }, canvas),
-    h('div', { class: 'card__meta' }, h('strong', { title: doc.name }, doc.name), h('span', {}, `${doc.pages} page${doc.pages > 1 ? 's' : ''} · ${fmtSize(doc.size)}`)));
-}
-
-const GROUP_COLORS = ['#60a5fa', '#f472b6', '#34d399', '#fbbf24', '#a78bfa', '#fb923c', '#22d3ee', '#f87171'];
-
-function fileCard(doc, extra = []) {
-  const canvas = h('canvas', { class: 'thumb' });
-  renderPage(doc.js, 0, 150, { canvas }).catch(() => {});
-  return h('div', { class: 'card' },
-    h('div', { class: 'card__page' }, canvas),
-    h('div', { class: 'card__meta' }, h('strong', { title: doc.name }, doc.name), h('span', {}, `${doc.pages} page${doc.pages > 1 ? 's' : ''} · ${fmtSize(doc.size)}`)),
-    ...extra);
-}
-
-// A grid of page thumbnails. `decorate(cell, index)` adds per-page controls.
-function pageGrid(doc, decorate) {
-  const grid = h('div', { class: 'pages' });
-  for (let i = 0; i < doc.pages; i++) {
-    const canvas = h('canvas', { class: 'thumb' });
-    renderPage(doc.js, i, 130, { canvas }).catch(() => {});
-    const cell = h('div', { class: 'pg', 'data-i': i }, h('div', { class: 'pg__page' }, canvas), h('span', { class: 'pg__num' }, String(i + 1)));
-    decorate?.(cell, i);
-    grid.append(cell);
-  }
-  return grid;
-}
-
-const pdfOut = (name, bytes) => ({ name, bytes, type: 'application/pdf' });
-
-// Renders a single page of `bytes` into `target` for live previews.
-async function previewInto(target, bytes, width) {
-  const js = await window.pdfjsLib.getDocument({ data: bytes, isEvalSupported: false }).promise;
-  const canvas = await renderPage(js, 0, width, { lazy: false });
-  js.destroy();
-  target.replaceChildren(canvas);
-}
-
-// Copies one page into a new document so a preview only redraws that page.
-async function singlePage(lib, index) {
-  const out = await PDFDocument.create();
-  const [p] = await out.copyPages(lib, [index]);
-  out.addPage(p);
-  return out;
-}
-
-function previewPane(doc, build) {
-  // build(lib, pageIndexes, isPreview) stamps onto lib's pages.
-  let index = 0;
-  let src = null;
-  const holder = h('div', { class: 'preview__page' });
-  const label = h('span', {});
-  const prev = h('button', { class: 'iconbtn', 'aria-label': 'Previous page', onclick: () => go(-1) }, icon('back'));
-  const next = h('button', { class: 'iconbtn flip', 'aria-label': 'Next page', onclick: () => go(1) }, icon('back'));
-  const pane = h('div', { class: 'preview' }, holder, h('div', { class: 'preview__nav' }, prev, label, next));
-  const go = (d) => { index = Math.min(doc.pages - 1, Math.max(0, index + d)); refresh(); };
-  const refresh = debounce(async () => {
-    label.textContent = `Page ${index + 1} of ${doc.pages}`;
-    prev.disabled = index === 0; next.disabled = index === doc.pages - 1;
-    try {
-      src ||= await loadLib(doc);
-      const one = await singlePage(src, index);
-      await build(one, [0], index);
-      await previewInto(holder, await one.save(), Math.min(560, pane.clientWidth || 520));
-    } catch (err) { console.error(err); }
-  }, 200);
-  pane.refresh = refresh;
-  refresh();
-  return pane;
-}
+export const CATEGORIES = [['organize', 'Organize'], ['optimize', 'Optimize'], ['convert', 'Convert'], ['edit', 'Edit'], ['security', 'Security'], ['ai', 'Intelligence'], ['workflows', 'Workflows']];
 
 /* ---------- MERGE ---------- */
 
@@ -344,7 +232,7 @@ const rotate = pagesTool({
 
 /* ---------- COMPRESS ---------- */
 
-const LEVELS = {
+export const LEVELS = {
   low: { maxSide: 2400, quality: 0.82 },
   medium: { maxSide: 1600, quality: 0.68 },
   high: { maxSide: 1100, quality: 0.5 },
@@ -384,7 +272,7 @@ const compress = {
 
 // Re-encodes photos inside the PDF as smaller JPEGs. Vector text and drawings
 // aren't touched. Images we can't decode safely are left as they are.
-async function shrinkImages(lib, { maxSide, quality }, progress) {
+export async function shrinkImages(lib, { maxSide, quality }, progress) {
   const { PDFName, PDFNumber, PDFRawStream, decodePDFRawStream } = window.PDFLib;
   const N = (n) => PDFName.of(n);
   const jobs = [];
@@ -530,12 +418,12 @@ const jpgToPdf = {
 /* ---------- PDF -> JPG ---------- */
 
 const pdfToJpg = {
-  id: 'pdf-to-jpg', keywords: 'image png jpeg convert export', title: 'PDF to JPG', icon: 'pdfToJpg', color: '#06b6d4', cat: 'convert', action: 'Convert to images', wide: true, busyText: 'Converting…',
-  desc: 'Save every page, or the pages you pick, as images.',
-  long: 'Save PDF pages as JPG or PNG images. Click pages to leave them out.',
+  id: 'pdf-to-jpg', keywords: 'image png jpeg convert export extract pictures photos', title: 'PDF to JPG', icon: 'pdfToJpg', color: '#06b6d4', cat: 'convert', action: 'Convert to images', wide: true, busyText: 'Converting…',
+  desc: 'Save pages as images, or pull out the pictures inside.',
+  long: 'Save PDF pages as JPG or PNG images, or extract the photos inside the PDF. Click pages to leave them out.',
   setup(ctx) {
     const doc = ctx.items[0];
-    const s = ctx.state = { format: 'jpg', dpi: 150, skip: new Set() };
+    const s = ctx.state = { mode: 'pages', format: 'jpg', dpi: 150, skip: new Set() };
     const grid = pageGrid(doc, (cell, i) => {
       cell.classList.add('on');
       cell.append(h('span', { class: 'pg__tick' }, icon('check')));
@@ -543,19 +431,32 @@ const pdfToJpg = {
     });
     grid.classList.add('pickable');
     const n = h('p', { class: 'muted' });
-    const count = () => { const k = doc.pages - s.skip.size; n.textContent = `${k} image${k === 1 ? '' : 's'}`; ctx.action.disabled = !k; };
+    const count = () => {
+      const k = doc.pages - s.skip.size;
+      n.textContent = s.mode === 'pages' ? `${k} image${k === 1 ? '' : 's'}` : `Images from ${k} page${k === 1 ? '' : 's'}`;
+      ctx.action.disabled = !k;
+    };
+    const format = field('Format', segmented([['jpg', 'JPG'], ['png', 'PNG']], s.format, (v) => (s.format = v)));
+    const quality = field('Quality', segmented([[96, 'Small'], [150, 'Normal'], [300, 'High']], s.dpi, (v) => (s.dpi = v)));
+    const about = h('p', { class: 'muted small', hidden: true }, 'Photos come out exactly as stored in the PDF (JPG), other pictures as PNG. Icons smaller than 40 px are skipped, and so are a few rare image kinds.');
     ctx.main.append(grid);
     ctx.side.append(
-      field('Format', segmented([['jpg', 'JPG'], ['png', 'PNG']], s.format, (v) => (s.format = v))),
-      field('Quality', segmented([[96, 'Small'], [150, 'Normal'], [300, 'High']], s.dpi, (v) => (s.dpi = v))),
-      n);
+      segmented([['pages', 'Pages to images'], ['images', 'Extract images']], s.mode, (v) => {
+        s.mode = v;
+        format.hidden = quality.hidden = v !== 'pages';
+        about.hidden = v === 'pages';
+        ctx.action.firstChild.textContent = v === 'pages' ? 'Convert to images' : 'Extract images';
+        count();
+      }),
+      format, quality, about, n);
     count();
   },
   async run(ctx) {
     const doc = ctx.items[0];
     const s = ctx.state;
-    const files = [];
     const want = [...Array(doc.pages).keys()].filter((i) => !s.skip.has(i));
+    if (s.mode === 'images') return this.extract(doc, want);
+    const files = [];
     for (const [k, i] of want.entries()) {
       busy(`Page ${k + 1} of ${want.length}…`);
       const c = await renderPage(doc.js, i, 0, { lazy: false, scale: s.dpi / 72 });
@@ -569,6 +470,64 @@ const pdfToJpg = {
       files.push({ name: `${baseName(doc.name)}-page-${i + 1}.${s.format}`, bytes: blob, type: blob.type });
     }
     return { files, zipName: `${baseName(doc.name)}-images.zip`, title: files.length > 1 ? `${files.length} images are ready` : 'Your image is ready' };
+  },
+  // Pulls the image objects out of the chosen pages (and the forms they
+  // draw), each once. JPEGs are copied byte for byte; the rest go through
+  // decodeImage, which handles 8-bit gray and RGB, and are saved as PNG.
+  async extract(doc, want) {
+    const { PDFName, PDFDict, PDFRawStream, PDFRef } = window.PDFLib;
+    const N = (n) => PDFName.of(n);
+    const lib = await loadLib(doc);
+    const found = [];
+    const seen = new Set();
+    const walk = (resources) => {
+      const xobjects = resources instanceof PDFDict && resources.lookup(N('XObject'));
+      if (!(xobjects instanceof PDFDict)) return;
+      for (const [, ref] of xobjects.entries()) {
+        const key = ref instanceof PDFRef ? ref.toString() : ref;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const obj = lib.context.lookup(ref);
+        if (!(obj instanceof PDFRawStream)) continue;
+        const type = obj.dict.get(N('Subtype'))?.toString();
+        if (type === '/Image') found.push(obj);
+        else if (type === '/Form') walk(obj.dict.lookup(N('Resources')));
+      }
+    };
+    want.forEach((i) => walk(lib.getPage(i).node.Resources()));
+    const files = [];
+    let skipped = 0;
+    for (const [k, obj] of found.entries()) {
+      busy(`Image ${k + 1} of ${found.length}…`);
+      await tick();
+      const d = obj.dict;
+      const w = d.get(N('Width'))?.asNumber?.() || 0;
+      const hgt = d.get(N('Height'))?.asNumber?.() || 0;
+      if (w < 40 || hgt < 40) continue;
+      const filter = d.get(N('Filter'));
+      const filters = filter ? (filter.asArray ? filter.asArray().map(String) : [String(filter)]) : [];
+      const name = `${baseName(doc.name)}-image-${files.length + 1}`;
+      if (filters.length === 1 && filters[0] === '/DCTDecode') {
+        files.push({ name: name + '.jpg', bytes: obj.contents, type: 'image/jpeg' });
+        continue;
+      }
+      let img = null;
+      try { img = d.get(N('ImageMask'))?.toString() === 'true' ? null : await decodeImage(obj, w, hgt, window.PDFLib); } catch (err) { console.warn('skipped image', err); }
+      if (!img) { skipped++; continue; }
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      c.getContext('2d').drawImage(img, 0, 0);
+      img.close?.();
+      const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+      c.width = c.height = 0;
+      files.push({ name: name + '.png', bytes: blob, type: 'image/png' });
+    }
+    if (!files.length) throw new Error(skipped ? 'The images on these pages are in a kind this tool can’t save yet.' : 'No pictures found on these pages. Try “Pages to images” instead.');
+    return {
+      files, zipName: `${baseName(doc.name)}-extracted-images.zip`,
+      title: files.length > 1 ? `${files.length} images extracted` : 'Your image is extracted',
+      note: skipped ? `${skipped} image${skipped === 1 ? '' : 's'} in a rarer format could not be saved.` : undefined,
+    };
   },
 };
 
@@ -620,7 +579,7 @@ const watermark = {
   },
 };
 
-async function stampWatermark(lib, indexes, s) {
+export async function stampWatermark(lib, indexes, s) {
   let mark; // { draw(page, cx, cy, frame) , w, h }
   if (s.kind === 'image') {
     if (!s.img) return;
@@ -707,7 +666,7 @@ const pageNumbers = {
 
 // indexes: pages of `lib` to stamp. realIndex: for previews, which page of the
 // original file `lib`'s single page is.
-async function stampNumbers(lib, indexes, s, realIndex) {
+export async function stampNumbers(lib, indexes, s, realIndex) {
   const total = s.total;
   let chosen;
   try { chosen = s.pages.trim() ? [...new Set(parseRanges(s.pages, total))].sort((a, b) => a - b) : [...Array(total).keys()]; } catch { chosen = [...Array(total).keys()]; }
@@ -793,7 +752,19 @@ const unlock = {
   },
 };
 
+// Same order as iLovePDF's menu. Ids not listed go at the end.
+const ORDER = [
+  'merge', 'split', 'remove-pages', 'extract-pages', 'organize', 'scan',
+  'compress', 'repair', 'ocr',
+  'jpg-to-pdf', 'word-to-pdf', 'ppt-to-pdf', 'excel-to-pdf', 'html-to-pdf',
+  'pdf-to-jpg', 'pdf-to-word', 'pdf-to-ppt', 'pdf-to-excel', 'pdf-to-pdfa', 'pdf-to-markdown',
+  'rotate', 'page-numbers', 'watermark', 'crop', 'edit', 'forms',
+  'unlock', 'protect', 'sign', 'redact', 'compare',
+  'summarize', 'translate', 'workflow',
+];
+const rank = (t) => (ORDER.includes(t.id) ? ORDER.indexOf(t.id) : ORDER.length);
 export const TOOLS = [
   merge, split, organize, rotate, compress, jpgToPdf, pdfToJpg,
   editorTool('edit'), editorTool('sign'), watermark, pageNumbers, protect, unlock,
-];
+  ...ORGANIZE_MORE, ...SECURITY_MORE, ...TO_PDF, ...FROM_PDF, ...SMART,
+].sort((a, b) => rank(a) - rank(b));

@@ -1,0 +1,37 @@
+/* Styles for js/more/to-pdf.js: Word, PowerPoint, Excel and HTML to PDF */
+
+/* The hidden frame documents are laid out in: rendered, but off screen. */
+.tp-frame { position: fixed; left: -20000px; top: 0; border: 0; background: #fff; pointer-events: none; }
+
+/* A file-type tile in place of a page thumbnail. */
+.tp-doc {
+  display: grid; place-items: center; width: 96px; height: 124px; border-radius: 8px 22px 8px 8px;
+  background: #fff; border: 1px solid var(--line); box-shadow: 0 6px 18px -6px rgba(23, 23, 58, .3);
+  color: var(--tp); font-weight: 800; font-size: .95rem; letter-spacing: .04em;
+  background-image: linear-gradient(var(--tp), var(--tp)); background-size: 100% 8px; background-repeat: no-repeat; background-position: bottom;
+}
+.tp-doc--sm { width: 46px; height: 58px; font-size: .62rem; border-radius: 6px 14px 6px 6px; flex: none; background-size: 100% 5px; }
+
+/* One file, for tools that take a single file. */
+.tp-file { display: flex; align-items: center; gap: 14px; padding: 12px; margin-bottom: 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); }
+.tp-file .card__meta { display: grid; gap: 2px; }
+.tp-file .card__meta strong, .tp-file .card__meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-file .card__meta span { color: var(--muted); font-size: .86rem; }
+
+/* Excel: sheet picker and preview. */
+.tp-sheets { display: grid; gap: 8px; max-height: 240px; overflow: auto; padding: 2px; }
+.tp-sheetrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.tp-sheetrow .check { min-width: 0; overflow-wrap: anywhere; }
+.tp-sheetrow .linkbtn { flex: none; font-size: .8rem; }
+.tp-sheetview { overflow: auto; max-height: min(70vh, 640px); border-radius: 14px; border: 1px solid var(--line); background: #fff; }
+.tp-sheetview > p { padding: 16px; margin: 0; }
+
+/* HTML: preview of the page as it will be converted. */
+.tp-htmlview { display: block; width: 100%; height: min(70vh, 720px); border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+.tp-paste { min-height: 220px; font: .85rem/1.45 Consolas, "SF Mono", Menlo, monospace; resize: vertical; }
+.tp-ask { display: grid; gap: 10px; }
+
+@media (max-width: 600px) {
+  .tp-doc:not(.tp-doc--sm) { width: 74px; height: 96px; font-size: .8rem; }
+  .tp-htmlview { height: 60vh; }
+}

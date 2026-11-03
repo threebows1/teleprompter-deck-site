@@ -174,7 +174,7 @@ function docRow(d, onDelete) {
     pending = { tool: toolId, files: [new File([rec.blob], rec.name, { type: rec.type })] };
     location.hash = toolId;
   };
-  const choices = TOOLS.filter((t) => (isImg ? t.accept === 'image' : t.accept !== 'image'));
+  const choices = TOOLS.filter((t) => kindOf(t) === (isImg ? 'image' : 'pdf'));
   return h('li', { class: 'doc' },
     h('span', { class: 'doc__icon' + (isImg ? ' doc__icon--img' : '') }, isImg ? 'IMG' : 'PDF'),
     h('div', { class: 'doc__meta' }, h('strong', { title: d.name }, d.name),
@@ -204,7 +204,7 @@ async function chooseTool(file) {
     body: (m) => {
       let choice = img ? 'jpg-to-pdf' : 'edit';
       m.value = () => choice;
-      const g = h('div', { class: 'pick' }, TOOLS.filter((t) => (img ? t.accept === 'image' : t.accept !== 'image')).map((t) =>
+      const g = h('div', { class: 'pick' }, TOOLS.filter((t) => kindOf(t) === (img ? 'image' : 'pdf')).map((t) =>
         h('button', { type: 'button', class: 'pick__item' + (t.id === choice ? ' on' : ''), style: { '--c': t.color }, onclick: (e) => { choice = t.id; g.querySelectorAll('.pick__item').forEach((b) => b.classList.toggle('on', b === e.currentTarget)); }, ondblclick: () => m.ok() },
           h('span', { class: 'tile__icon' }, icon(t.icon)), h('span', {}, t.title))));
       return [h('p', {}, 'It is saved in My documents. Pick a tool to open it now.'), g];
@@ -230,24 +230,33 @@ function showTool(tool) {
   showDrop(tool, body);
 }
 
-const acceptOf = (tool) => (tool.accept === 'image' ? 'image/*' : 'application/pdf,.pdf');
-const accepts = (tool, f) => (tool.accept === 'image' ? isImage(f) : isPdf(f));
+// tool.accept: 'pdf' (default), 'image', or { accept: '.docx,...', test(file), label: 'Word files' }
+// for other kinds. Only PDFs are opened up front; other files reach the tool as { file, name, size }.
+const kindOf = (tool) => (typeof tool.accept === 'object' ? 'other' : tool.accept === 'image' ? 'image' : 'pdf');
+const acceptOf = (tool) => ({ image: 'image/*', pdf: 'application/pdf,.pdf', other: tool.accept?.accept })[kindOf(tool)];
+const accepts = (tool, f) => ({ image: isImage, pdf: isPdf, other: (x) => tool.accept.test(x) })[kindOf(tool)](f);
+const labelOf = (tool) => ({ image: 'images', pdf: 'PDF files', other: tool.accept?.label || 'files' })[kindOf(tool)];
 
 function showDrop(tool, body) {
   const pick = async () => onFiles(await pickFiles({ accept: acceptOf(tool), multiple: !!tool.multiple }));
   const onFiles = async (files) => {
     files = files.filter((f) => accepts(tool, f));
-    if (!files.length) return toast(tool.accept === 'image' ? 'Choose image files (JPG, PNG, WebP).' : 'Choose a PDF file.', 'bad');
+    if (!files.length) return toast(`Choose ${kindOf(tool) === 'image' ? 'image files (JPG, PNG, WebP)' : labelOf(tool)}.`, 'bad');
     if (!tool.multiple) files = files.slice(0, 1);
     const items = await openAll(tool, files);
     if (items.length) startWork(tool, body, items);
   };
-  const img = tool.accept === 'image';
+  const kind = kindOf(tool);
+  const img = kind === 'image';
+  const what = kind === 'other' ? tool.accept.label : null;
   const zone = h('div', { class: 'drop' },
     h('span', { class: 'drop__icon', 'aria-hidden': 'true' }, icon(img ? 'image' : 'upload')),
-    h('h2', { class: 'drop__title' }, img ? (tool.multiple ? 'Choose your images' : 'Choose an image') : (tool.multiple ? 'Choose your PDF files' : 'Choose a PDF file')),
+    h('h2', { class: 'drop__title' }, what ? `Choose ${tool.multiple ? 'your' : 'a'} ${what}` : img ? (tool.multiple ? 'Choose your images' : 'Choose an image') : (tool.multiple ? 'Choose your PDF files' : 'Choose a PDF file')),
     h('p', { class: 'drop__or' }, img ? 'Drag and drop JPG, PNG or WebP images here, or' : 'Drag and drop here, or'),
-    h('button', { class: 'btn btn--solid btn--big', onclick: pick }, icon('plus'), img ? 'Select images' : (tool.multiple ? 'Select PDF files' : 'Select PDF file')),
+    h('button', { class: 'btn btn--solid btn--big', onclick: pick }, icon('plus'), what ? `Select ${what}` : img ? 'Select images' : (tool.multiple ? 'Select PDF files' : 'Select PDF file')),
+    // Extra ways in (camera, a web address…): tool.dropExtra(start) returns nodes;
+    // start(items) skips straight to the workspace with items the tool made.
+    tool.dropExtra && h('div', { class: 'drop__extra' }, tool.dropExtra((items) => startWork(tool, body, items))),
     h('p', { class: 'drop__note' }, icon('shield'), 'Opened on this device, never uploaded'));
   dropHandler = onFiles;
   document.body.classList.remove('has-bar');
@@ -262,7 +271,7 @@ function showDrop(tool, body) {
 async function openAll(tool, files) {
   const out = [];
   for (const [i, f] of files.entries()) {
-    if (tool.accept === 'image') { out.push({ file: f, name: f.name, size: f.size }); continue; }
+    if (kindOf(tool) !== 'pdf') { out.push({ file: f, name: f.name, size: f.size }); continue; }
     busy(files.length > 1 ? `Opening ${i + 1} of ${files.length}…` : 'Opening…');
     await tick();
     try {
@@ -338,6 +347,16 @@ const NEXT = {
   'jpg-to-pdf': ['compress', 'merge', 'sign', 'protect'],
   'pdf-to-jpg': ['jpg-to-pdf', 'compress', 'split', 'edit'],
   protect: ['unlock', 'compress', 'sign', 'merge'],
+  scan: ['ocr', 'compress', 'merge', 'sign'],
+  ocr: ['pdf-to-word', 'compress', 'redact', 'translate'],
+  repair: ['compress', 'ocr', 'unlock', 'merge'],
+  redact: ['protect', 'compress', 'sign', 'merge'],
+  forms: ['sign', 'protect', 'compress', 'merge'],
+  translate: ['compress', 'summarize', 'pdf-to-word', 'sign'],
+  'word-to-pdf': ['compress', 'merge', 'sign', 'protect'],
+  'ppt-to-pdf': ['compress', 'merge', 'sign', 'protect'],
+  'excel-to-pdf': ['compress', 'merge', 'sign', 'protect'],
+  'html-to-pdf': ['compress', 'merge', 'sign', 'protect'],
 };
 const FALLBACK = ['compress', 'merge', 'edit', 'sign', 'protect', 'split'];
 

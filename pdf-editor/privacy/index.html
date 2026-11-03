@@ -28,7 +28,19 @@
   <p>Clearing this site's data in your browser removes all of it. We do not use cookies, accounts, analytics or ads on PDF Tools.</p>
 
   <h2>Things loaded from other sites</h2>
-  <p>When you open the Type tab of the signature maker, the handwriting fonts are loaded from Google Fonts. Google receives the request for the font files, as with any website that uses them, but not your name or your documents: the signature itself is drawn on your device.</p>
+  <p>A few tools fetch data from another site. None of them sends your files or your text anywhere:</p>
+  <ul>
+    <li><strong>OCR PDF</strong> downloads a language model (about 0.4–3 MB per language) from cdn.jsdelivr.net the first time you use a language, and your browser keeps it for next time. This is the reading engine's data, not your file; the reading itself happens on your device.</li>
+    <li><strong>HTML to PDF</strong>: if you type a web address, your browser asks that website for the page, the same as opening it in a tab.</li>
+    <li><strong>Sign PDF</strong>: when you open the Type tab of the signature maker, the handwriting fonts load from Google Fonts. Google receives the request for the font files, not your name or your documents.</li>
+  </ul>
+
+  <h2>AI, camera and saved workflows</h2>
+  <ul>
+    <li><strong>AI Summarizer and Translate PDF</strong> use the AI built into Google Chrome, which runs on your computer. Chrome may download its AI model the first time; your text is not sent to us or to Google for this. In other browsers the summarizer uses a simple method that also runs on your device, and Translate PDF is not available.</li>
+    <li><strong>Scan to PDF</strong> uses your camera only while the camera view is open, with your permission. Photos stay on your device.</li>
+    <li><strong>Workflows</strong> you save are kept in your browser. Passwords in them are never saved.</li>
+  </ul>
 
   <h2>Contact</h2>
   <p>Questions: <a href="mailto:mysecondwish11@gmail.com">mysecondwish11@gmail.com</a></p>
