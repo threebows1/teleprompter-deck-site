@@ -9,7 +9,6 @@ const { PDFName, PDFArray, PDFRawStream, decodePDFRawStream } = window.PDFLib;
 const WS = new Set([0, 9, 10, 12, 13, 32]);
 const DELIM = new Set([40, 41, 60, 62, 91, 93, 123, 125, 47, 37]); // ( ) < > [ ] { } / %
 const isRegular = (c) => !WS.has(c) && !DELIM.has(c);
-const STRING = { str: true };
 
 // Returns every operator with its operands and the byte range it covers.
 export function parseOps(b) {
@@ -29,14 +28,21 @@ export function parseOps(b) {
   // One operand. Returns undefined at an operator (i left on it).
   const value = () => {
     const c = b[i];
-    if (c === 40) { // (literal string)
-      let depth = 0;
+    if (c === 40) { // (literal string); len = how many bytes it holds
+      let depth = 0, len = -1;
       for (; i < n; i++) {
-        if (b[i] === 92) { i++; continue; }
+        if (b[i] === 92) { // escape: \n, \(, \ddd count as one byte; \<newline> as none
+          i++;
+          if (b[i] === 10 || b[i] === 13) { if (b[i] === 13 && b[i + 1] === 10) i++; continue; }
+          if (b[i] >= 48 && b[i] <= 55) { let d = 1; while (d < 3 && b[i + 1] >= 48 && b[i + 1] <= 55) { i++; d++; } }
+          len++;
+          continue;
+        }
         if (b[i] === 40) depth++;
         else if (b[i] === 41 && --depth === 0) { i++; break; }
+        len++;
       }
-      return STRING;
+      return { str: true, len: Math.max(0, len) };
     }
     if (c === 60 && b[i + 1] === 60) { // << dict >>
       i += 2;
@@ -50,7 +56,12 @@ export function parseOps(b) {
       }
       return d;
     }
-    if (c === 60) { while (i < n && b[i] !== 62) i++; i++; return STRING; } // <hex>
+    if (c === 60) { // <hex>
+      let digits = 0;
+      for (i++; i < n && b[i] !== 62; i++) if (!WS.has(b[i])) digits++;
+      i++;
+      return { str: true, len: Math.ceil(digits / 2) };
+    }
     if (c === 91) { // [ array ]
       i++;
       const a = [];
@@ -91,7 +102,10 @@ export function parseOps(b) {
       const id = indexOfWord(b, 'ID', i);
       let j = id < 0 ? n : id + 3;
       for (; j < n - 1; j++) {
-        if (b[j] === 69 && b[j + 1] === 73 && WS.has(b[j - 1]) && (j + 2 >= n || WS.has(b[j + 2]))) { j += 2; break; }
+        if (b[j] !== 69 || b[j + 1] !== 73 || !(j + 2 >= n || WS.has(b[j + 2]))) continue;
+        // Usually whitespace comes before EI, but some writers put it right
+        // after the data; then accept it when plain content follows.
+        if (WS.has(b[j - 1]) || looksLikeContent(b, j + 2)) { j += 2; break; }
       }
       i = Math.min(j, n);
     }
@@ -100,6 +114,19 @@ export function parseOps(b) {
     argStart = -1;
   }
   return ops;
+}
+
+// True when the bytes after `from` read like content-stream text (printable
+// ASCII and whitespace), not more binary image data.
+function looksLikeContent(b, from) {
+  const end = Math.min(b.length, from + 16);
+  let seen = 0;
+  for (let j = from; j < end; j++) {
+    const c = b[j];
+    if (!(WS.has(c) || (c >= 33 && c <= 126))) return false;
+    if (!WS.has(c)) seen++;
+  }
+  return seen > 0 || end === b.length;
 }
 
 function indexOfWord(b, w, from) {
@@ -122,6 +149,8 @@ const num = (a, k) => (typeof a[k] === 'number' ? a[k] : 0);
 const cmyk = (c, m, y, k) => [(1 - c) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k)];
 
 const SHOW = new Set(['Tj', 'TJ', "'", '"']);
+// How many bytes of text an operator's strings hold (1 or 2 per glyph).
+const strBytes = (a) => a.reduce((s, x) => s + (Array.isArray(x) ? strBytes(x) : x?.str ? x.len : 0), 0);
 
 // Where each text-showing operator starts, in PDF user space, and its fill colour.
 export function findShows(ops) {
@@ -132,8 +161,9 @@ export function findShows(ops) {
   ops.forEach((o, k) => {
     const a = o.args;
     switch (o.op) {
-      case 'q': stack.push({ ctm, fill }); break;
-      case 'Q': if (stack.length) ({ ctm, fill } = stack.pop()); break;
+      // Text state (TL here) is part of the graphics state too.
+      case 'q': stack.push({ ctm, fill, tl }); break;
+      case 'Q': if (stack.length) ({ ctm, fill, tl } = stack.pop()); break;
       case 'cm': ctm = mul(a.slice(0, 6).map((_, j) => num(a, j)), ctm); break;
       case 'BT': tm = tlm = ID; break;
       case 'TL': tl = num(a, 0); break;
@@ -156,7 +186,7 @@ export function findShows(ops) {
         if (SHOW.has(o.op)) {
           if (o.op === "'" || o.op === '"') td(0, -tl);
           const m = mul(tm, ctm);
-          shows.push({ k, x: m[4], y: m[5], color: fill });
+          shows.push({ k, x: m[4], y: m[5], color: fill, bytes: strBytes(a) });
         }
     }
   });
@@ -242,15 +272,34 @@ export function matchItems(items, shows) {
     });
     if (best >= 0) { items[best].own.push(s.k); s.item = best; }
   }
+  // Each command holds only so much text. Whatever its own items used up is
+  // gone, so text found elsewhere on the line (e.g. drawn by a form XObject)
+  // is not pinned on a command that cannot have drawn it.
+  const chars = (it) => [...(it.str || '')].filter((ch) => !/\s/.test(ch)).length;
+  const left = new Map(shows.map((s) => [s.k, s.bytes ?? Infinity]));
+  items.forEach((it) => {
+    let need = chars(it);
+    it.own.forEach((k, n) => {
+      const take = n === it.own.length - 1 ? need : Math.min(need, left.get(k));
+      left.set(k, left.get(k) - take);
+      need -= take;
+    });
+  });
   items.forEach((it, j) => {
     if (it.own.length) return;
     const g = geo[j];
-    let best = -1, bestAlong = -Infinity;
+    let best = null, bestAlong = -Infinity;
     for (const s of shows) {
       const { along, across } = local(g, s);
-      if (Math.abs(across) <= g.h * 0.4 && along <= g.h * 0.3 && along > bestAlong) { bestAlong = along; best = s.k; }
+      if (Math.abs(across) <= g.h * 0.4 && along <= g.h * 0.3 && along > bestAlong) { bestAlong = along; best = s; }
     }
-    it.parent = best;
+    // Only the nearest command to the left can have drawn it, and only if it
+    // still has text to spare (ligatures let one byte make two letters).
+    const need = chars(it);
+    if (best && left.get(best.k) >= Math.ceil(need * 0.5)) {
+      it.parent = best.k;
+      left.set(best.k, left.get(best.k) - need);
+    } else it.parent = -1;
   });
   for (const it of items) it.color = colorOf(shows, it.own[0] ?? it.parent);
 }

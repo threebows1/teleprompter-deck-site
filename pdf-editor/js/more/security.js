@@ -22,9 +22,27 @@ const screenPx = (cssWidth) => Math.min(1600, Math.round(cssWidth * Math.min(win
 
 /* ---------- a page's text, with positions ---------- */
 
+// Where each character of `str` ends, as a share of the whole string's
+// width, measured in a stand-in for its font. pdf.js only gives a run's
+// total width; splitting it evenly puts a word after "iiii" or "WWWW" far
+// from where it is drawn.
+let measurer;
+function charEnds(str, family) {
+  measurer ||= document.createElement('canvas').getContext('2d');
+  measurer.font = `100px ${family || 'sans-serif'}`;
+  const ends = [];
+  for (let k = 1; k <= str.length; k++) ends.push(measurer.measureText(str.slice(0, k)).width);
+  const total = ends[ends.length - 1];
+  return total > 0 ? ends.map((e) => e / total) : ends.map((_, k) => (k + 1) / str.length);
+}
+
 // Every character of a page's text and where it is in view space (points,
 // top-left origin, after /Rotate). boxes(a, b) covers characters a..b-1 with
-// one rectangle per text run, so a match across two lines isn't one huge box.
+// one rectangle per text run, so a match across two lines isn't one huge box;
+// unless `tight`, the rectangles have room to spare (redaction must cover
+// every glyph, even when the stand-in font measures a little differently).
+// `annots` is the text of the page's form fields and annotations, which
+// pdf.js keeps out of the page text, with each one's rectangle.
 const texts = new WeakMap();
 function pageText(js, i) {
   if (!texts.has(js)) texts.set(js, []);
@@ -33,6 +51,20 @@ function pageText(js, i) {
     const page = await js.getPage(i + 1);
     const vp = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent();
+    const W = vp.width, H = vp.height;
+    const annots = [];
+    try {
+      for (const a of await page.getAnnotations()) {
+        const said = [a.fieldValue, a.contentsObj?.str, a.richText?.str, a.textContent, a.alternativeText, a.buttonValue]
+          .flat().filter((x) => typeof x === 'string' && x.trim());
+        if (!said.length || !a.rect) continue;
+        const [x0, y0, x1, y1] = vp.convertToViewportRectangle(a.rect);
+        const x = clamp(Math.min(x0, x1), 0, W), y = clamp(Math.min(y0, y1), 0, H);
+        const r = { x, y, w: clamp(Math.max(x0, x1), 0, W) - x, h: clamp(Math.max(y0, y1), 0, H) - y };
+        // A field's value and the text of its appearance are often the same words.
+        if (r.w > 0.5 && r.h > 0.5) annots.push({ texts: [...new Set(said)], rect: r });
+      }
+    } catch { /* a page whose annotations can't be read still has its text */ }
     page.cleanup();
     let text = '';
     const runs = [];
@@ -43,40 +75,58 @@ function pageText(js, i) {
         const t = window.pdfjsLib.Util.transform(vp.transform, it.transform);
         const size = Math.hypot(t[2], t[3]) || 1;
         const len = Math.hypot(t[0], t[1]) || 1;
-        runs.push({ ox: t[4], oy: t[5], ux: t[0] / len, uy: t[1] / len, vx: t[2] / size, vy: t[3] / size, size, w: it.width, n: it.str.length });
+        runs.push({ ox: t[4], oy: t[5], ux: t[0] / len, uy: t[1] / len, vx: t[2] / size, vy: t[3] / size, size, w: it.width, n: it.str.length,
+          str: it.str, family: tc.styles?.[it.fontName]?.fontFamily, rtl: it.dir === 'rtl' });
         for (let k = 0; k < it.str.length; k++) at.push([runs.length - 1, k]);
       } else for (let k = 0; k < it.str.length; k++) at.push(null);
       text += it.str;
       if (it.hasEOL) { text += '\n'; at.push(null); }
     }
-    const W = vp.width, H = vp.height;
-    const rect = (r, k0, k1) => {
+    const rect = (r, k0, k1, tight) => {
+      const e = (r.ends ||= charEnds(r.str, r.family));
+      let t0 = k0 ? e[k0 - 1] : 0, t1 = e[k1];
+      if (r.rtl) [t0, t1] = [1 - t1, 1 - t0];
+      const pad = tight ? 0 : 0.15 * r.size;
       const xs = [], ys = [];
-      for (const t of [k0 / r.n, (k1 + 1) / r.n]) for (const s of [-0.25, 0.95]) {
-        xs.push(r.ox + r.ux * r.w * t + r.vx * r.size * s);
-        ys.push(r.oy + r.uy * r.w * t + r.vy * r.size * s);
+      for (const u of [t0 * r.w - pad, t1 * r.w + pad]) for (const s of tight ? [-0.25, 0.95] : [-0.35, 1.05]) {
+        xs.push(r.ox + r.ux * u + r.vx * r.size * s);
+        ys.push(r.oy + r.uy * u + r.vy * r.size * s);
       }
       const x = clamp(Math.min(...xs), 0, W), y = clamp(Math.min(...ys), 0, H);
       return { x, y, w: clamp(Math.max(...xs), 0, W) - x, h: clamp(Math.max(...ys), 0, H) - y };
     };
-    const boxes = (a, b) => {
+    const boxes = (a, b, tight = false) => {
       const out = [];
       let cur = null;
       for (let c = a; c < b; c++) {
         const p = at[c];
         if (!p) continue;
         if (cur && cur.r === p[0] && cur.k1 === p[1] - 1) cur.k1 = p[1];
-        else { if (cur) out.push(rect(runs[cur.r], cur.k0, cur.k1)); cur = { r: p[0], k0: p[1], k1: p[1] }; }
+        else { if (cur) out.push(rect(runs[cur.r], cur.k0, cur.k1, tight)); cur = { r: p[0], k0: p[1], k1: p[1] }; }
       }
-      if (cur) out.push(rect(runs[cur.r], cur.k0, cur.k1));
+      if (cur) out.push(rect(runs[cur.r], cur.k0, cur.k1, tight));
       return out.filter((r) => r.w > 0.5 && r.h > 0.5);
     };
-    return { text, W, H, boxes };
+    return { text, W, H, boxes, annots };
   })();
   return cache[i];
 }
 
 const hasText = async (js, i) => /\S/.test((await pageText(js, i)).text);
+// OCR leaves a page alone only when it has real text, not just a stamped
+// page number or a short label on top of a scan.
+const TINY_TEXT = 15;
+const hasRealText = async (js, i) => ((await pageText(js, i)).text.match(/\S/g) || []).length >= TINY_TEXT;
+
+// A page's frame (see pageFrame) as pdf.js shows it: the CropBox clipped to
+// the MediaBox, and /Rotate as a reader applies it. Text positions and
+// rendered pictures come from pdf.js, so whatever is drawn back must use this.
+async function viewFrame(js, i) {
+  const pg = await js.getPage(i + 1);
+  const [x0, y0, x1, y1] = pg.view;
+  const box = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+  return { ...pageFrame({ getCropBox: () => box, getMediaBox: () => box, getRotation: () => ({ angle: pg.rotate }) }), view: pg.view, rotate: pg.rotate };
+}
 const allPages = (doc) => [...Array(doc.pages).keys()];
 
 /* ---------- fonts for any of our languages ---------- */
@@ -170,7 +220,7 @@ const ocr = {
       h('p', { class: 'muted small' }, 'Reading takes a few seconds per page. Clear, straight scans work best, and each extra language makes it a little slower.'));
     drawLangs();
     update();
-    Promise.all(allPages(doc).map((i) => hasText(doc.js, i).catch(() => false))).then((r) => {
+    Promise.all(allPages(doc).map((i) => hasRealText(doc.js, i).catch(() => false))).then((r) => {
       s.withText = r;
       r.forEach((t, i) => t && grid.querySelector(`.pg[data-i="${i}"]`)?.append(h('span', { class: 'sec-tag' }, 'Has text')));
       update();
@@ -179,7 +229,7 @@ const ocr = {
   async run(ctx) {
     const doc = ctx.items[0];
     const s = ctx.state;
-    const withText = s.withText || await Promise.all(allPages(doc).map((i) => hasText(doc.js, i)));
+    const withText = s.withText || await Promise.all(allPages(doc).map((i) => hasRealText(doc.js, i)));
     const want = allPages(doc).filter((i) => !(s.skip && withText[i]));
     if (!want.length) throw new Error('Every page already has text.');
     busy('Loading the text reader…');
@@ -208,7 +258,7 @@ const ocr = {
         reading = want.length > 1 ? `Reading page ${n + 1} of ${want.length}…` : 'Reading the page…';
         busy(reading);
         const page = lib.getPage(i);
-        const f = pageFrame(page);
+        const f = await viewFrame(doc.js, i);
         // About 300 dpi, but no bigger than Tesseract handles comfortably.
         const scale = Math.min(300 / 72, 4200 / Math.max(f.W, f.H));
         const canvas = await renderPage(doc.js, i, 0, { lazy: false, scale });
@@ -398,7 +448,8 @@ const redact = {
     // Marks every match of `re` on every page, as one group in the list.
     const find = async (id, label, re, keep = () => true) => {
       busy('Searching…');
-      const g = { id, label, boxes: [], hits: 0 };
+      const g = { id, label, boxes: [], hits: 0, re, keep };
+      const box = (i, r) => ({ page: i, hit: g.hits, x: r.x - 1, y: r.y - 1, w: r.w + 2, h: r.h + 2 });
       try {
         for (let i = 0; i < doc.pages; i++) {
           const t = await pageText(doc.js, i);
@@ -407,7 +458,14 @@ const redact = {
             const found = t.boxes(m.index, m.index + m[0].length);
             if (!found.length) continue;
             g.hits++;
-            g.boxes.push(...found.map((r) => ({ page: i, hit: g.hits, x: r.x - 1, y: r.y - 1, w: r.w + 2, h: r.h + 2 })));
+            g.boxes.push(...found.map((r) => box(i, r)));
+          }
+          // Form field values and comments: the whole field or note is covered.
+          for (const a of t.annots) {
+            const n = Math.max(...a.texts.map((x) => [...x.matchAll(re)].filter((m) => m[0].trim() && keep(m[0])).length));
+            if (!n) continue;
+            g.hits += n;
+            g.boxes.push(box(i, a.rect));
           }
         }
       } finally { busy(false); }
@@ -426,7 +484,11 @@ const redact = {
     const findQuery = () => {
       const q = query.value.trim();
       if (!q) { query.focus(); return; }
-      const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi');
+      // Any spacing between words; inside a word, a soft hyphen or a line
+      // break (with or without a hyphen) may split it.
+      const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const split = '(?:\\u00ad|-?[ \\t]*\\n[ \\t]*)?';
+      const re = new RegExp(q.split(/\s+/).map((w) => [...w].map(esc).join(split)).join('\\s+'), 'gi');
       find('q:' + q.toLowerCase(), `“${q}”`, re);
     };
 
@@ -472,7 +534,8 @@ const redact = {
     for (const [k, i] of pages.entries()) {
       busy(`Redacting page ${k + 1} of ${pages.length}…`);
       const page = lib.getPage(i);
-      const f = pageFrame(page);
+      // The marks are where pdf.js shows things, so the page's size comes from it too.
+      const f = await viewFrame(doc.js, i);
       const canvas = await rasterize(doc.js, i, Math.min(s.dpi / 72, 6000 / Math.max(f.W, f.H)));
       const kx = canvas.width / f.W, ky = canvas.height / f.H;
       const c = canvas.getContext('2d');
@@ -484,16 +547,19 @@ const redact = {
       const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.9));
       canvas.width = canvas.height = 0;
       const img = await lib.embedJpg(new Uint8Array(await blob.arrayBuffer()));
-      blankPage(lib, page);
+      blankPage(lib, page, f.view, f.rotate);
       // The picture goes on upright as the page is shown, at the page's own size.
       const g = pageFrame(page);
       const a = boxAnchor(g, g.W / 2, g.H / 2, g.W, g.H);
       page.drawImage(img, { x: a.x, y: a.y, width: g.W, height: g.H, rotate: a.rotate });
     }
+    let outlines = 0, extras = false;
     if (pages.length) {
       // Tags can repeat a page's text (alternate and actual text).
       lib.catalog.delete(N('StructTreeRoot'));
       lib.catalog.delete(N('MarkInfo'));
+      outlines = scrubOutlines(lib, s.groups.filter((g) => g.re));
+      extras = dropScriptsAndFiles(lib);
     }
     if (s.info) {
       lib.context.trailerInfo.Info = undefined;
@@ -505,7 +571,10 @@ const redact = {
     return {
       files: [pdfOut(`${baseName(doc.name)}-redacted.pdf`, await lib.save({ updateFieldAppearances: false }))],
       title: 'Your PDF is redacted',
-      note: `${plural(boxes.length, 'area')} removed on ${plural(pages.length, 'page')}.${s.info ? ' Document info removed too.' : ''}`,
+      note: `${plural(boxes.length, 'area')} removed on ${plural(pages.length, 'page')}.`
+        + (outlines ? ` ${plural(outlines, 'bookmark')} with marked text ${outlines === 1 ? 'was' : 'were'} renamed “Redacted”.` : '')
+        + (extras ? ' Attached files and scripts were removed.' : '')
+        + (s.info ? ' Document info removed too.' : ''),
     };
   },
 };
@@ -523,22 +592,63 @@ async function rasterize(js, i, scale) {
 
 // Empties a page down to its size and rotation: no content, fonts, images,
 // links, form fields, thumbnails or tags are left on it.
-function blankPage(lib, page) {
+// `view` is the visible box as pdf.js gives it ([x0, y0, x1, y1]), and R
+// the rotation it applied.
+function blankPage(lib, page, view, R) {
   const N = (n) => window.PDFLib.PDFName.of(n);
-  const { x, y, width, height } = page.getCropBox();
-  const R = page.getRotation().angle;
   for (const key of page.node.keys()) if (key !== N('Type') && key !== N('Parent')) page.node.delete(key);
-  page.node.set(N('MediaBox'), lib.context.obj([x, y, x + width, y + height]));
+  page.node.set(N('MediaBox'), lib.context.obj([...view]));
   page.node.set(N('Resources'), lib.context.obj({}));
   page.setRotation(degrees(R));
 }
 
+// Bookmarks whose title has marked text are renamed. Returns how many.
+function scrubOutlines(lib, groups) {
+  const { PDFName, PDFDict, PDFString, PDFHexString } = window.PDFLib;
+  const N = (n) => PDFName.of(n);
+  const root = lib.catalog.lookupMaybe(N('Outlines'), PDFDict);
+  if (!root || !groups.length) return 0;
+  const marked = (t) => groups.some((g) => [...t.matchAll(g.re)].some((m) => m[0].trim() && g.keep(m[0])));
+  const seen = new Set();
+  const stack = [root.get(N('First'))];
+  let n = 0;
+  while (stack.length) {
+    const o = stack.pop();
+    if (!o || seen.has(o)) continue;
+    seen.add(o);
+    const item = lib.context.lookup(o);
+    if (!(item instanceof PDFDict)) continue;
+    const t = item.lookup(N('Title'));
+    if ((t instanceof PDFString || t instanceof PDFHexString) && marked(t.decodeText())) { item.set(N('Title'), PDFHexString.fromText('Redacted')); n++; }
+    stack.push(item.get(N('Next')), item.get(N('First')));
+  }
+  return n;
+}
+
+// Document scripts and attached files can hold anything, and nobody can see
+// them to mark them, so they go with any redaction. True if there were some.
+function dropScriptsAndFiles(lib) {
+  const { PDFName, PDFDict } = window.PDFLib;
+  const N = (n) => PDFName.of(n);
+  const cat = lib.catalog;
+  let any = false;
+  const names = cat.lookupMaybe(N('Names'), PDFDict);
+  for (const k of ['JavaScript', 'EmbeddedFiles']) if (names?.has(N(k))) { names.delete(N(k)); any = true; }
+  for (const k of ['AF', 'AA']) if (cat.has(N(k))) { cat.delete(N(k)); any = true; }
+  const open = cat.lookup(N('OpenAction'));
+  if (open instanceof PDFDict && open.lookup(N('S')) !== N('GoTo')) { cat.delete(N('OpenAction')); any = true; }
+  return any;
+}
+
 // A form field with a widget on a redacted page still holds its value in the
-// document's form, so the whole field goes.
+// document's form, so the whole field goes: out of the form, out of the
+// calculation order, off every page, and its value and looks are cleared in
+// case anything else still points at it.
 function dropFields(lib, pages) {
   const { PDFName, PDFDict, PDFArray, PDFRef } = window.PDFLib;
   const N = (n) => PDFName.of(n);
-  const fields = lib.catalog.lookupMaybe(N('AcroForm'), PDFDict)?.lookupMaybe(N('Fields'), PDFArray);
+  const form = lib.catalog.lookupMaybe(N('AcroForm'), PDFDict);
+  const fields = form?.lookupMaybe(N('Fields'), PDFArray);
   if (!fields) return;
   const roots = new Set();
   for (const i of pages) {
@@ -551,7 +661,29 @@ function dropFields(lib, pages) {
       roots.add(ref);
     }
   }
-  for (let k = fields.size() - 1; k >= 0; k--) if (roots.has(fields.get(k))) fields.remove(k);
+  if (!roots.size) return;
+  for (const key of ['Fields', 'CO']) {
+    const list = form.lookupMaybe(N(key), PDFArray);
+    for (let k = (list?.size() ?? 0) - 1; k >= 0; k--) if (roots.has(list.get(k))) list.remove(k);
+  }
+  // XFA keeps its own copy of every value.
+  form.delete(N('XFA'));
+  const gone = new Set();
+  const stack = [...roots];
+  while (stack.length) {
+    const o = stack.pop();
+    if (gone.has(o)) continue;
+    gone.add(o);
+    const d = o instanceof PDFRef ? lib.context.lookup(o) : o;
+    if (!(d instanceof PDFDict)) continue;
+    const kids = d.lookupMaybe(N('Kids'), PDFArray);
+    for (let k = 0; k < (kids?.size() ?? 0); k++) stack.push(kids.get(k));
+    for (const key of ['V', 'DV', 'AP', 'RV', 'Kids']) d.delete(N(key));
+  }
+  for (const page of lib.getPages()) {
+    const annots = page.node.lookupMaybe(N('Annots'), PDFArray);
+    for (let k = (annots?.size() ?? 0) - 1; k >= 0; k--) if (gone.has(annots.get(k))) annots.remove(k);
+  }
 }
 
 // pdf-lib writes every object it read, used or not, so the old page content
@@ -584,7 +716,7 @@ function docWords(doc) {
     const pages = [];
     for (let i = 0; i < doc.pages; i++) {
       const t = await pageText(doc.js, i);
-      const words = [...t.text.matchAll(/\S+/g)].map((m) => ({ t: m[0].normalize('NFKC'), page: i, rects: t.boxes(m.index, m.index + m[0].length) }));
+      const words = [...t.text.matchAll(/\S+/g)].map((m) => ({ t: m[0].normalize('NFKC'), page: i, rects: t.boxes(m.index, m.index + m[0].length, true) }));
       pages.push({ W: t.W, H: t.H, words });
     }
     return pages;
@@ -641,7 +773,8 @@ async function compareDocs(oldDoc, newDoc) {
     keep = { keepA: new Uint8Array(wa.length), keepB: new Uint8Array(wb.length) };
     for (let i = 0, oa = 0, ob = 0; i < Math.max(A.length, B.length); i++) {
       const pa = A[i]?.words || [], pb = B[i]?.words || [];
-      const r = diff(pa.map((w) => w.t), pb.map((w) => w.t));
+      // A page too different to line up word by word is all changed.
+      const r = diff(pa.map((w) => w.t), pb.map((w) => w.t), 2000) || { keepA: new Uint8Array(pa.length), keepB: new Uint8Array(pb.length) };
       keep.keepA.set(r.keepA, oa); keep.keepB.set(r.keepB, ob);
       oa += pa.length; ob += pb.length;
     }
@@ -883,8 +1016,9 @@ async function report(oldDoc, newDoc, r) {
         continue;
       }
       const src = lib.getPage(i);
-      const f = pageFrame(src);
-      const cb = src.getCropBox();
+      // Sized as pdf.js shows the page, like the change marks drawn on it.
+      const f = await viewFrame((k ? newDoc : oldDoc).js, i);
+      const cb = { x: f.view[0], y: f.view[1], width: f.view[2] - f.view[0], height: f.view[3] - f.view[1] };
       const emb = await out.embedPage(src, { left: cb.x, bottom: cb.y, right: cb.x + cb.width, top: cb.y + cb.height });
       const sc = Math.min(slotW / f.W, slotH / f.H);
       const w = cb.width * sc, hh = cb.height * sc;

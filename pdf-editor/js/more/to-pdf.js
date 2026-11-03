@@ -22,6 +22,15 @@ const SIZES = { a4: [595.28, 841.89], letter: [612, 792] };
 const SCALE = 2; // image pixels per CSS px of the page: sharp in print and when zoomed
 const STRIP = 1800; // tallest piece drawn at once, so canvases stay within phone limits
 const MAX_PAGE = 14400; // the largest page PDF readers accept (200 inches)
+const MAX_SIDE = 4000; // widest or tallest canvas drawn at once (phones refuse ~16M pixels)
+const LOAD_WAIT = 10000; // longest wait for a frame, its pictures or its fonts
+
+// Nothing in a layout frame may reach the network: a document must not be
+// able to ping a tracker (or hold up the conversion) with a picture, a style
+// sheet or a font. Its own pictures and fonts come as data: or blob: URLs.
+// `origin` lets a page fetched by web address load its own pictures and styles.
+const cspFor = (origin = '') => `default-src 'none'; img-src data: blob: ${origin}; style-src 'unsafe-inline' data: ${origin}; font-src data: blob: ${origin}; media-src data: blob:`.replace(/ +;/g, ';');
+const timeout = (p, ms = LOAD_WAIT) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
 
 // Hidden frames scroll; their scrollbars must not take width or get drawn.
 const NO_BARS = 'html { scrollbar-width: none; } html::-webkit-scrollbar { display: none; }';
@@ -34,19 +43,39 @@ const lib = (name) => loadScript({
 
 // A hidden frame to lay a document out in, away from the app's own styles.
 // Sandboxed without allow-scripts: nothing inside it can run.
-async function frame(width, height, html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${NO_BARS}</style></head><body></body></html>`) {
+async function frame(width, height, html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${cspFor()}"><style>${NO_BARS}</style></head><body></body></html>`) {
   const el = h('iframe', { class: 'tp-frame', sandbox: 'allow-same-origin', 'aria-hidden': 'true', tabindex: '-1', style: { width: width + 'px', height: height + 'px' } });
   const loaded = new Promise((r) => el.addEventListener('load', r, { once: true }));
   el.srcdoc = html;
   document.body.append(el);
-  await loaded;
+  // A picture or style sheet that never answers would hold up `load` forever.
+  await timeout(loaded);
   return el;
 }
 
 // Waits for fonts and pictures so measurements and drawings match.
 async function settle(doc) {
   await Promise.all([...doc.images].map((im) => (im.complete ? null : new Promise((r) => { im.addEventListener('load', r); im.addEventListener('error', r); setTimeout(r, 8000); }))));
-  await doc.fonts?.ready;
+  // Give up on pictures still loading: html2canvas waits for every picture of
+  // its copy of the page with no time limit, so one that never answers would
+  // stop the conversion. They are then counted as pictures that couldn't load.
+  for (const im of doc.images) {
+    if (im.complete) continue;
+    im.removeAttribute('srcset');
+    im.closest('picture')?.querySelectorAll('source').forEach((s) => s.remove());
+    im.src = 'data:,';
+  }
+  if (doc.fonts) await timeout(doc.fonts.ready);
+}
+
+// Points every url() and @import in the frame's styles that leads outside the
+// file at nothing. The frame's policy already blocks them, but html2canvas
+// loads background pictures again from the app's own window.
+function localOnly(doc) {
+  const fix = (t) => t.replace(/@import[^;]*;?/gi, '')
+    .replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (m, q, u) => (/^(data|blob):|^#/i.test(u.trim()) ? m : 'url("data:,")'));
+  for (const st of doc.querySelectorAll('style')) if (/url\(|@import/i.test(st.textContent)) st.textContent = fix(st.textContent);
+  for (const el of doc.querySelectorAll('[style*="url("]')) el.setAttribute('style', fix(el.getAttribute('style')));
 }
 
 // Draws part of `el` (x, y relative to its top-left, in CSS px) to a canvas.
@@ -74,15 +103,18 @@ async function jpeg(canvas) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.9));
   canvas.width = canvas.height = 0;
+  if (!blob) throw new Error('This page is too large to draw on this device. Try fewer columns or a smaller page.');
   return new Uint8Array(await blob.arrayBuffer());
 }
 
 // Draws rows [y0, y1) of `el` onto `page`, its top-left at (left, top) points,
-// k points per CSS px. Tall areas go in strips.
+// k points per CSS px. Tall areas go in strips; no canvas side passes MAX_SIDE.
 async function paint(pdf, page, el, { x0 = 0, y0, y1, w, left, top, k, scale = SCALE }) {
-  for (let y = y0; y < y1; y += STRIP) {
-    const hh = Math.min(STRIP, y1 - y);
-    const img = await pdf.embedJpg(await jpeg(await shoot(el, x0, y, w, hh, scale)));
+  const sc = Math.min(scale, MAX_SIDE / w);
+  const strip = Math.max(1, Math.min(STRIP, Math.floor(MAX_SIDE / sc)));
+  for (let y = y0; y < y1; y += strip) {
+    const hh = Math.min(strip, y1 - y);
+    const img = await pdf.embedJpg(await jpeg(await shoot(el, x0, y, w, hh, sc)));
     page.drawImage(img, { x: left, y: page.getHeight() - top - (y - y0 + hh) * k, width: w * k, height: hh * k });
   }
 }
@@ -95,17 +127,38 @@ function wordsIn(root, keep = () => true) {
   const walk = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const range = doc.createRange();
   const out = [];
+  // Per element: whether it is see-through, and the box its overflow clips it to.
+  const seen = new Map();
+  const look = (el) => {
+    if (seen.has(el)) return seen.get(el);
+    const up = el === root || !el.parentElement ? { gone: false, clip: null } : look(el.parentElement);
+    const cs = win.getComputedStyle(el);
+    let clip = up.clip;
+    if (cs.overflowX !== 'visible' || cs.overflowY !== 'visible') {
+      const r = el.getBoundingClientRect();
+      clip = clip ? { left: Math.max(clip.left, r.left), top: Math.max(clip.top, r.top), right: Math.min(clip.right, r.right), bottom: Math.min(clip.bottom, r.bottom) } : { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    }
+    const v = { gone: up.gone || parseFloat(cs.opacity) === 0, clip };
+    seen.set(el, v);
+    return v;
+  };
   for (let n; (n = walk.nextNode());) {
     const s = n.nodeValue;
     if (!s.trim() || !n.parentElement) continue;
     const cs = win.getComputedStyle(n.parentElement);
     if (cs.visibility !== 'visible' || cs.display === 'none') continue;
+    // Text that can't be seen on the page (see-through, or cut off by its box)
+    // stays out of the text layer too.
+    const { gone, clip } = look(n.parentElement);
+    if (gone) continue;
     const size = parseFloat(cs.fontSize);
     for (const m of s.matchAll(/\S+/g)) {
       range.setStart(n, m.index);
       range.setEnd(n, m.index + m[0].length);
       const r = range.getBoundingClientRect();
-      if (r.width < 0.5 || r.height < 0.5 || !keep(r.left + r.width / 2, r.top + r.height / 2)) continue;
+      const mx = r.left + r.width / 2, my = r.top + r.height / 2;
+      if (r.width < 0.5 || r.height < 0.5 || !keep(mx, my)) continue;
+      if (clip && (mx < clip.left || mx > clip.right || my < clip.top || my > clip.bottom)) continue;
       out.push({ text: m[0], x: r.left, y: r.top, w: r.width, h: r.height, size });
     }
   }
@@ -131,7 +184,8 @@ function addWords(page, font, words, at) {
       L.setTextMatrix(1, 0, 0, 1, x, H - y), L.showText(font.encodeText(w.text + ' ')));
   }
   ops.push(L.endText(), L.popGraphicsState());
-  page.pushOperators(...ops);
+  // In batches: a big sheet has more words than a call can take arguments.
+  for (let i = 0; i < ops.length; i += 4000) page.pushOperators(...ops.slice(i, i + 4000));
 }
 
 // Things a page break should not cut through: lines of text, pictures and
@@ -157,7 +211,8 @@ function solids(root, origin) {
 function forcedBreaks(root, origin) {
   const win = root.ownerDocument.defaultView;
   const out = [];
-  const forced = (v) => /page|always|left|right/.test(v);
+  // Exact values only: "avoid-page" asks for no break.
+  const forced = (v) => /^(page|always|left|right|recto|verso)$/.test(v);
   for (const el of root.querySelectorAll('*')) {
     const cs = win.getComputedStyle(el);
     if (forced(cs.breakBefore) || forced(cs.pageBreakBefore)) out.push(el.getBoundingClientRect().top - origin);
@@ -183,8 +238,18 @@ function breaks(total, avail, boxes, forced = []) {
           if (b > end + 0.5 && t > y + 0.5 && b - t < avail) { end = t; moved = true; }
         }
       }
-      // Nothing sensible to break at (one huge picture): cut at the full height.
-      if (end - y < avail * 0.2) end = Math.min(y + avail, total);
+      // Nothing sensible to break at (one huge picture or table row): cut
+      // near the full height, but still between lines of text.
+      if (end - y < avail * 0.2) {
+        end = Math.min(y + avail, total);
+        for (let moved = true; moved;) {
+          moved = false;
+          for (const [t, b] of boxes) {
+            if (t >= end) break;
+            if (b > end + 0.5 && t > y + 0.5 && b - t < avail * 0.2) { end = t; moved = true; }
+          }
+        }
+      }
     }
     out.push([y, end]);
     y = end;
@@ -288,7 +353,9 @@ section.docx { margin: 0 0 24px; box-shadow: none; }
 
 async function wordToPdf(item, pdf, font, progress, s) {
   await Promise.all([lib('canvas'), lib('docx')]);
-  const data = await markPageFields(item.file);
+  const unreadable = () => new Error(`“${item.name}” could not be read as a Word file.`);
+  let data;
+  try { data = await markPageFields(item.file); } catch (err) { console.error(err); throw unreadable(); }
   const fr = await frame(1200, 1200);
   try {
     const doc = fr.contentDocument;
@@ -299,12 +366,14 @@ async function wordToPdf(item, pdf, font, progress, s) {
       });
     } catch (err) {
       console.error(err);
-      throw new Error(`“${item.name}” could not be read as a Word file.`);
+      throw unreadable();
     }
+    if (!doc.querySelector('section.docx')) throw unreadable();
     // After rendering: docx-preview empties the style container first.
     doc.head.append(Object.assign(doc.createElement('style'), { textContent: WORD_CSS }));
     for (const st of doc.querySelectorAll('style')) st.textContent = st.textContent.replace(/font-family:\s*([^;}]+)/g, (m, fam) => (/(serif|monospace)\s*$/.test(fam) ? m : `font-family: ${fontStack(fam.split(',')[0].trim().replace(/['"]/g, ''))}`));
     for (const el of doc.body.querySelectorAll('[style*="font-family"]')) el.style.fontFamily = fontStack(el.style.fontFamily.split(',')[0].replace(/['"]/g, '').trim());
+    localOnly(doc);
     await settle(doc);
 
     // Each docx-preview section is one or more pages. Put its body in a window
@@ -462,7 +531,9 @@ async function openDeck(file) {
     defaults: kid(pres, 'defaultTextStyle'),
     tableStyles: await xml('ppt/tableStyles.xml'),
     themes: new Map(),
-    missing: { charts: 0, pictures: 0 },
+    has: (path) => !!(path && zip.file(path)),
+    // Pictures left out, each counted once (a master's logo shows on every slide).
+    missing: { charts: 0, odd: new Set(), gone: new Set() },
   };
 }
 
@@ -837,10 +908,13 @@ async function renderSlide(deck, path, slideNo) {
   const th = deck.themes.get(masterPath);
   const txStyles = kid(master, 'txStyles');
 
-  const parts = { slide: { el: slide, rels: sRels }, layout: { el: layout, rels: lRels }, master: { el: master, rels: mRels } };
-  const picture = async (blip, rels) => {
-    const src = blip && rels[rid(blip)]?.path ? await deck.image(rels[rid(blip)].path) : null;
-    if (blip && !src) deck.missing.pictures++;
+  const parts = { slide: { el: slide, rels: sRels, path }, layout: { el: layout, rels: lRels, path: layoutPath }, master: { el: master, rels: mRels, path: masterPath } };
+  const picture = async (blip, part) => {
+    if (!blip) return null;
+    const target = part.rels[rid(blip)]?.path;
+    const src = target ? await deck.image(target) : null;
+    // A file that is there but can't be shown (EMF…), or one that is missing or linked from outside.
+    if (!src) (deck.has(target) ? deck.missing.odd : deck.missing.gone).add(target || `${part.path}#${rid(blip)}`);
     return src;
   };
 
@@ -855,7 +929,7 @@ async function renderSlide(deck, path, slideNo) {
     if (f?.color) root.style.background = rgba(f.color);
     else if (f?.stops) root.style.backgroundImage = `${f.radial ? 'radial-gradient(circle' : `linear-gradient(${f.angle + 90}deg`}, ${f.stops.map((s) => `${rgba(s.color)} ${s.pos}%`).join(', ')})`;
     else if (f?.blip) {
-      const src = await picture(f.blip, part.rels);
+      const src = await picture(f.blip, part);
       if (src) Object.assign(root.style, { backgroundImage: `url("${src}")`, backgroundSize: f.tile ? 'auto' : '100% 100%', backgroundRepeat: f.tile ? 'repeat' : 'no-repeat' });
     }
     break;
@@ -900,7 +974,7 @@ async function renderSlide(deck, path, slideNo) {
     const visible = (fill && !fill.none) || line;
     if (visible) {
       const paths = geom?.localName === 'custGeom' ? customPaths(geom, b.w, b.h) : [{ d: presetPath(geom, b.w, b.h), fill: !/^(line|straightConnector1|bentConnector\d)$/.test(A(geom, 'prst')), stroke: true }];
-      wrap.append(await shapeSvg(paths, b, fill, line, fill?.blip && await picture(fill.blip, part.rels)));
+      wrap.append(await shapeSvg(paths, b, fill, line, fill?.blip && await picture(fill.blip, part)));
     }
     const tx = kid(el, 'txBody');
     if (tx && kids(tx, 'p').some((p) => p.textContent.trim())) {
@@ -933,7 +1007,7 @@ async function renderSlide(deck, path, slideNo) {
 
   const pic = async (el, part, b) => {
     const blip = dig(el, 'blipFill', 'blip');
-    const src = await picture(blip, part.rels);
+    const src = await picture(blip, part);
     const wrap = placed(b, 'tp-sh tp-pic');
     if (!src) return wrap;
     const crop = dig(el, 'blipFill', 'srcRect');
@@ -1084,7 +1158,8 @@ async function pptToPdf(item, pdf, font, progress, s) {
     const notes = [
       hidden && `${hidden} hidden slide${hidden > 1 ? 's were' : ' was'} left out`,
       deck.missing.charts && `${deck.missing.charts} chart${deck.missing.charts > 1 ? 's' : ''} could not be drawn`,
-      deck.missing.pictures && `${deck.missing.pictures} picture${deck.missing.pictures > 1 ? 's' : ''} in a format browsers can’t show (like EMF) ${deck.missing.pictures > 1 ? 'were' : 'was'} left out`,
+      deck.missing.odd.size && `${deck.missing.odd.size} picture${deck.missing.odd.size > 1 ? 's' : ''} in a format browsers can’t show (like EMF) ${deck.missing.odd.size > 1 ? 'were' : 'was'} left out`,
+      deck.missing.gone.size && `${deck.missing.gone.size} picture${deck.missing.gone.size > 1 ? 's' : ''} missing from the file (or linked from outside it) ${deck.missing.gone.size > 1 ? 'were' : 'was'} left out`,
     ].filter(Boolean);
     return notes.length ? notes.join('; ') + '.' : null;
   } finally {
@@ -1209,11 +1284,23 @@ function sheetTable(m, rows, cols, grid) {
 
 async function readBook(item) {
   await lib('xlsx');
+  const bad = () => new Error(`“${item.name}” could not be read as a spreadsheet.`);
+  const buf = await item.file.arrayBuffer();
+  const u = new Uint8Array(buf, 0, Math.min(4, buf.byteLength));
+  // .xlsx, .xlsm and .ods are ZIP files; anything else would be misread as CSV text.
+  if (!buf.byteLength || (/\.(xlsx|xlsm|ods)$/i.test(item.name) && !(u[0] === 0x50 && u[1] === 0x4b))) throw bad();
   try {
-    return window.XLSX.read(await item.file.arrayBuffer(), { type: 'array', cellStyles: true, cellDates: true, dense: false });
+    const opts = { cellStyles: true, cellDates: true, dense: false };
+    if (/\.csv$/i.test(item.name)) {
+      // SheetJS reads CSV bytes as Windows-1252; most CSVs are UTF-8 (with or without a BOM).
+      let text;
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { text = new TextDecoder('windows-1252').decode(buf); }
+      return window.XLSX.read(text, { ...opts, type: 'string' });
+    }
+    return window.XLSX.read(buf, { ...opts, type: 'array' });
   } catch (err) {
     console.error(err);
-    throw new Error(`“${item.name}” could not be read as a spreadsheet.`);
+    throw bad();
   }
 }
 
@@ -1263,7 +1350,8 @@ async function excelToPdf(item, pdf, font, progress, s) {
       const r = t.getBoundingClientRect();
       const page = pdf.addPage([j.PW, j.PH]);
       const k = j.k * PX;
-      await paint(pdf, page, t, { y0: 0, y1: r.height, w: r.width, left: s.margin, top: s.margin, k, scale: Math.min(4, SCALE / j.k) });
+      // The same pixels per point however far the table is shrunk (paint also caps the canvas).
+      await paint(pdf, page, t, { y0: 0, y1: r.height, w: r.width, left: s.margin, top: s.margin, k, scale: Math.max(1, SCALE * j.k) });
       addWords(page, font, wordsIn(t), { k, map: (x, y) => [s.margin + (x - r.left) * k, s.margin + (y - r.top) * k] });
     }
     return null;
@@ -1307,14 +1395,16 @@ const excelToPdfTool = {
     }
     busy(false);
     const sync = () => { ctx.action.disabled = !s.sheets.size; };
-    sheets.replaceChildren(...s.book.SheetNames.map((name) => {
+    sheets.replaceChildren(...s.book.SheetNames.map((name, i) => {
       const m = sheetModel(s.book.Sheets[name]);
-      if (m) s.sheets.add(name);
+      // Like Excel, hidden sheets are not printed unless asked for.
+      const hidden = !!s.book.Workbook?.Sheets?.[i]?.Hidden;
+      if (m && !hidden) s.sheets.add(name);
       return h('div', { class: 'tp-sheetrow' },
-        check(name, !!m, (v) => { v ? s.sheets.add(name) : s.sheets.delete(name); sync(); }),
+        check(hidden ? `${name} (hidden)` : name, !!m && !hidden, (v) => { v ? s.sheets.add(name) : s.sheets.delete(name); sync(); }),
         h('button', { type: 'button', class: 'linkbtn', title: 'Preview this sheet', 'aria-label': `Preview ${name}`, onclick: () => show(name) }, m ? `${m.rows.length} row${m.rows.length === 1 ? '' : 's'}` : 'empty'));
     }));
-    show(s.book.SheetNames.find((n) => s.sheets.has(n)) || null);
+    show(s.book.SheetNames.find((n) => s.sheets.has(n)) || s.book.SheetNames.find((n) => sheetModel(s.book.Sheets[n])) || null);
     sync();
   },
   async run(ctx) {
@@ -1325,21 +1415,60 @@ const excelToPdfTool = {
 
 /* ---------- HTML ---------- */
 
+// Attributes that make the browser fetch something.
+const FETCH_ATTRS = /^(src|poster|background|lowsrc|dynsrc|data|icon|manifest|ping|xlink:href)$/i;
+
 // Takes out everything that could run or navigate, and pins down a base
-// address so a fetched page finds its pictures and styles.
+// address so a fetched page finds its pictures and styles. Nothing may be
+// fetched from other websites: an uploaded or pasted page could hold tracking
+// pictures. A page fetched by web address may load from its own site only.
+// The references are taken out here, not just blocked by the frame's policy,
+// because html2canvas loads pictures again from the app's own window.
 function cleanHtml(html, base) {
   const d = new DOMParser().parseFromString(html, 'text/html');
   d.querySelectorAll('script, iframe, frame, frameset, object, embed, applet, portal, meta[http-equiv], base').forEach((el) => el.remove());
+  const origin = base ? new URL(base).origin : '';
+  let blocked = 0;
+  const ok = (v) => {
+    v = (v || '').trim();
+    if (!v || v[0] === '#' || /^(data|blob):/i.test(v)) return true;
+    if (!origin) return false;
+    try { return new URL(v, base).origin === origin; } catch { return false; }
+  };
+  const css = (text) => text
+    .replace(/@import\s+(['"])(.*?)\1[^;]*;?/gi, (m, q, u) => (ok(u) ? m : (blocked++, '')))
+    .replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (m, q, u) => (ok(u) ? m : (blocked++, 'url("data:,")')));
+  for (const el of d.querySelectorAll('link')) {
+    if (/(^|\s)stylesheet(\s|$)/i.test(el.getAttribute('rel') || '') && ok(el.getAttribute('href'))) continue;
+    // Prefetch, preconnect, icons…: none are needed for a picture of the page.
+    if (el.getAttribute('href')) blocked++;
+    el.remove();
+  }
+  for (const el of d.querySelectorAll('style')) el.textContent = css(el.textContent);
   for (const el of d.querySelectorAll('*')) {
-    for (const a of [...el.attributes]) if (/^on/i.test(a.name) || /^\s*(javascript|vbscript):/i.test(a.value)) el.removeAttribute(a.name);
+    for (const a of [...el.attributes]) {
+      const n = a.name.toLowerCase();
+      if (/^on/.test(n) || /^\s*(javascript|vbscript):/i.test(a.value)) el.removeAttribute(a.name);
+      else if (n === 'style') { if (/url\(|@import/i.test(a.value)) el.setAttribute('style', css(a.value)); }
+      else if (n === 'srcset' || n === 'imagesrcset') {
+        const keep = a.value.split(/,\s+/).filter((c) => ok(c.trim().split(/\s+/)[0]));
+        if (keep.length < a.value.split(/,\s+/).length) blocked++;
+        if (keep.length) el.setAttribute(a.name, keep.join(', ')); else { el.removeAttribute(a.name); el.setAttribute('data-tp-cut', ''); }
+      } else if ((FETCH_ATTRS.test(n) || (n === 'href' && !/^(a|area)$/i.test(el.localName))) && !ok(a.value)) {
+        if (n !== 'ping') blocked++;
+        el.removeAttribute(a.name);
+        el.setAttribute('data-tp-cut', '');
+      }
+    }
     // Lazy pictures would never load in a hidden frame.
     if (el.getAttribute('loading') === 'lazy') el.removeAttribute('loading');
   }
+  if (blocked) d.documentElement.setAttribute('data-tp-blocked', blocked);
   const head = d.head;
   if (base) head.prepend(Object.assign(d.createElement('base'), { href: base }));
   const csp = d.createElement('meta');
   csp.httpEquiv = 'Content-Security-Policy';
-  csp.content = "script-src 'none'; object-src 'none'; frame-src 'none'";
+  csp.content = cspFor(origin);
   head.prepend(csp);
   if (!d.querySelector('meta[charset]')) head.prepend(Object.assign(d.createElement('meta'), { charset: 'utf-8' }));
   return '<!DOCTYPE html>' + d.documentElement.outerHTML;
@@ -1376,11 +1505,17 @@ async function htmlToPdf(item, pdf, font, progress, s) {
     for (const [i, [y0, y1]] of pages.entries()) {
       progress(i + 1, pages.length);
       const page = pdf.addPage(long ? [PW, (y1 - y0) * k + 2 * s.margin] : [PW, PH]);
-      await paint(pdf, page, root, { y0, y1, w: lw, left: s.margin, top: s.margin, k, scale: Math.min(4, SCALE * PX / k) });
+      // The same pixels per point however far the page is shrunk (paint also caps the canvas).
+      await paint(pdf, page, root, { y0, y1, w: lw, left: s.margin, top: s.margin, k, scale: Math.max(1, SCALE / PX * k) });
       addWords(page, font, wordsIn(doc.body || root, (x, y) => y >= y0 && y < y1), { k, map: (x, y) => [s.margin + x * k, s.margin + (y - y0) * k] });
     }
-    const missing = [...doc.images].filter((im) => !im.naturalWidth).length;
-    return missing ? `${missing} picture${missing > 1 ? 's' : ''} could not be loaded${item.base ? '' : ' (pictures next to an .html file can’t be reached; use a web address or a page saved as one file)'}.` : null;
+    // Pictures taken out for linking to other websites are counted separately.
+    const missing = [...doc.images].filter((im) => !im.naturalWidth && !im.hasAttribute('data-tp-cut')).length;
+    const blocked = +root.getAttribute('data-tp-blocked') || 0;
+    return [
+      missing && `${missing} picture${missing > 1 ? 's' : ''} could not be loaded${item.base ? '' : ' (pictures next to an .html file can’t be reached; use a web address or a page saved as one file)'}.`,
+      blocked && `${blocked} link${blocked > 1 ? 's' : ''} to pictures, styles or fonts on ${item.base ? 'other websites' : 'the web'} ${blocked > 1 ? 'were' : 'was'} left out, so nothing was fetched from ${item.base ? 'them' : 'it'}.`,
+    ].filter(Boolean).join(' ') || null;
   } finally {
     fr.remove();
   }

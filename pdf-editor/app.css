@@ -168,6 +168,7 @@ footer.bottom a:hover { color: var(--text); }
 .doc:first-child { border-top: 0; }
 .doc__icon { width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); font-size: .68rem; font-weight: 800; letter-spacing: .04em; }
 .doc__icon--img { background: #e3f8f4; color: #0f8f7a; }
+.doc__icon--other { background: #eef0f4; color: #475569; }
 .doc__meta { min-width: 0; }
 .doc__meta strong { display: block; font-size: .95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .doc__meta span { color: var(--faint); font-size: .82rem; }
@@ -444,7 +445,9 @@ select.field { appearance: auto; }
 .ed-pages[data-tool="draw"] .obj, .ed-pages[data-tool="highlight"] .obj, .ed-pages[data-tool="whiteout"] .obj { pointer-events: none; }
 .tx { position: absolute; display: none; border-radius: 3px; cursor: text; }
 .ed-pages[data-tool="edittext"] .tx { display: block; outline: 1px dashed rgba(102, 70, 232, .45); outline-offset: 1px; }
-.ed-pages[data-tool="edittext"] .tx:hover { background: rgba(102, 70, 232, .1); outline: 1.5px solid var(--primary); }
+.ed-pages[data-tool="edittext"] .tx:hover, .ed-pages[data-tool="edittext"] .tx:focus-visible { background: rgba(102, 70, 232, .1); outline: 1.5px solid var(--primary); }
+.obj:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.sig-hint { margin: 10px 0 0; color: #b42318; font-size: .88rem; font-weight: 600; }
 .mask { position: absolute; pointer-events: none; }
 .obj { position: absolute; cursor: move; touch-action: none; }
 .obj.sel { outline: 1.5px solid var(--primary); outline-offset: 3px; border-radius: 2px; }

@@ -345,7 +345,14 @@ const crop = {
 async function rebuild(bytes) {
   const { PDFName, PDFDict, PDFPage, PDFPageLeaf, PDFObjectCopier } = window.PDFLib;
   const N = (n) => PDFName.of(n);
-  const src = await PDFDocument.load(bytes, { throwOnInvalidObject: false, updateMetadata: false });
+  const opts = { throwOnInvalidObject: false, updateMetadata: false };
+  let src;
+  try { src = await PDFDocument.load(bytes, opts); } catch (err) {
+    // Locked only against changes (an owner password): it opens with an empty
+    // password. Pages copied out leave the encryption behind.
+    if (!(err instanceof window.PDFLib.EncryptedPDFError || /encrypted/i.test(err?.message))) throw err;
+    src = await PDFDocument.load(bytes, { ...opts, password: '' });
+  }
   const out = await PDFDocument.create();
   let count = 0;
   try { count = src.getPageCount(); } catch { /* broken page tree */ }
@@ -468,6 +475,7 @@ async function camera() {
   }
   return new Promise((resolve) => {
     const shots = [];
+    let closed = false;
     const video = h('video', { class: 'cam__video', autoplay: true, playsinline: true });
     video.muted = true;
     video.srcObject = stream;
@@ -482,6 +490,8 @@ async function camera() {
       c.getContext('2d').drawImage(video, 0, 0);
       flash.classList.remove('on'); void flash.offsetWidth; flash.classList.add('on');
       const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.92));
+      c.width = c.height = 0;
+      if (closed || !blob) return; // closed while this photo was being saved
       const n = shots.length + 1;
       const file = new File([blob], `scan-${n}.jpg`, { type: 'image/jpeg' });
       const shot = { file, name: file.name, size: file.size, url: URL.createObjectURL(blob) };
@@ -492,13 +502,19 @@ async function camera() {
       count();
     };
     const close = (keep) => {
+      if (closed) return;
+      closed = true;
       stream.getTracks().forEach((t) => t.stop());
       shots.forEach((s) => URL.revokeObjectURL(s.url));
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('hashchange', onLeave);
       wrap.remove();
       resolve(keep ? shots.map(({ file, name, size }) => ({ file, name, size })) : []);
     };
     const onKey = (e) => { if (e.key === 'Escape') close(false); };
+    // Leaving the page (Back, a link) turns the camera off.
+    const onLeave = () => close(false);
+    window.addEventListener('hashchange', onLeave);
     const wrap = h('div', { class: 'cam', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Camera' },
       h('div', { class: 'cam__view' }, video, flash),
       h('div', { class: 'cam__bar' },
@@ -600,12 +616,20 @@ const scan = {
     };
     const prep = (it) => {
       Object.assign(it, { uid: uid(), rot: 0, cut: null, look: s.look, thumb: h('div', { class: 'card__page' }) });
-      redraw(it).catch(() => { it.bad = true; it.thumb.replaceChildren(h('span', { class: 'muted small' }, 'Can’t read this image')); });
+      redraw(it).catch(() => unreadable(it));
       return it;
     };
-    const turn = (it, by) => { it.rot = (it.rot + by + 360) % 360; if (it.cut) it.cut = turnRect(it.cut, by); redraw(it); };
+    // Shown once decoding fails; the card is drawn again so Crop turns off.
+    const unreadable = (it) => {
+      if (it.bad) return;
+      it.bad = true;
+      it.thumb.replaceChildren(h('span', { class: 'muted small' }, 'Can’t read this image'));
+      if (ctx.items.includes(it)) draw();
+    };
+    const turn = (it, by) => { it.rot = (it.rot + by + 360) % 360; if (it.cut) it.cut = turnRect(it.cut, by); redraw(it).catch(() => unreadable(it)); };
     const edit = async (it) => {
-      it.small ||= await decode(it.file, 900);
+      if (it.bad) return;
+      try { it.small ||= await decode(it.file, 900); } catch { unreadable(it); return; }
       let cut = it.cut || FULL;
       let look = it.look;
       const stage = h('div', { class: 'crop__stage' }, h('canvas'));
@@ -624,7 +648,7 @@ const scan = {
       if (!ok) return;
       it.cut = isFull(cut) ? null : cut;
       it.look = look;
-      redraw(it);
+      redraw(it).catch(() => unreadable(it));
     };
     const draw = () => {
       list.replaceChildren(...ctx.items.map((it, k) => h('div', { class: 'card', 'data-id': it.uid },
@@ -648,7 +672,7 @@ const scan = {
     ctx.main.append(list);
     ctx.side.append(
       h('p', {}, 'Drag pages to change their order. Use the buttons on a page to turn or crop it.'),
-      field('Look of every page', choiceCards(LOOKS, s.look, (v) => { s.look = v; ctx.items.forEach((it) => { it.look = v; redraw(it); }); })),
+      field('Look of every page', choiceCards(LOOKS, s.look, (v) => { s.look = v; ctx.items.forEach((it) => { it.look = v; if (!it.bad) redraw(it).catch(() => unreadable(it)); }); })),
       h('button', { class: 'btn btn--ghost btn--block', onclick: async () => push(await camera()) }, icon('camera'), 'Take more photos'),
       count);
     draw();

@@ -6,7 +6,7 @@
 // real PDF coordinates when saving.
 import {
   h, icon, busy, tick, StandardFonts, degrees, BlendMode, loadLib, renderPage, baseName, pageSizes,
-  pageFrame, boxAnchor, fontCanDraw, textAsPng, hexToRgb, imageForPdf, pickFiles, modal, uid, toast,
+  pageFrame, boxAnchor, fontCanDraw, textAsPng, hexToRgb, imageForPdf, pickFiles, modal, STAY, uid, toast,
 } from './core.js';
 import { readPage, matchItems, dropOps, plan } from './content.js';
 
@@ -44,6 +44,7 @@ export function editorTool(mode) {
 async function setupEditor(ctx, signMode) {
   const doc = ctx.items[0];
   const sizes = await pageSizes(doc.js);
+  if (!ctx.main.isConnected) return; // left while the pages were measured
   const st = ctx.state = {
     doc, sizes, objects: [], history: [], tool: signMode ? 'select' : 'edittext', selected: null, editing: null, pending: null, scale: 1,
     texts: [], // per page: the PDF's own text, once read (see readText)
@@ -115,15 +116,37 @@ async function setupEditor(ctx, signMode) {
   }), { rootMargin: '600px 0px' });
   pageEls.forEach((p) => io.observe(p));
 
+  // Once the editor is off the page (another tool, Change file, saved), stop
+  // everything it started, or the observers go on drawing every page.
+  const gone = () => {
+    if (pagesEl.isConnected) return false;
+    if (!st.closed) {
+      st.closed = true;
+      io.disconnect();
+      ro.disconnect();
+      document.removeEventListener('keydown', onKey);
+      st.images?.forEach((_, src) => URL.revokeObjectURL(src));
+    }
+    return true;
+  };
+
   async function paintPage(i) {
     const p = pageEls[i];
-    if (p.rendered === st.scale) return;
+    if (p.rendered === st.scale || gone()) return;
     p.rendered = st.scale;
     await renderPage(doc.js, i, sizes[i].w * st.scale, { canvas: p.canvas }).catch(() => {});
-    if (!signMode) showBoxes(i);
+    if (!signMode && !gone()) showBoxes(i).catch((err) => textFailed(err));
+  }
+  // The PDF's own text could not be read (pdf-lib can't open the file).
+  function textFailed(err) {
+    console.warn(err);
+    if (st.warnedText) return;
+    st.warnedText = true;
+    toast(err?.message || 'The text in this PDF can’t be edited. You can still add things on top.', 'bad');
   }
 
   function layout() {
+    if (gone()) return 0;
     const avail = Math.max(280, pagesEl.clientWidth - 24);
     pageEls.forEach((p, i) => {
       const { w, h: hh } = sizes[i];
@@ -149,7 +172,8 @@ async function setupEditor(ctx, signMode) {
     st.scale = Math.min(4, Math.max(0.3, st.scale * k));
     layout();
   }
-  new ResizeObserver(() => { if (!st.userZoom) fitWidth(); }).observe(pagesEl);
+  const ro = new ResizeObserver(() => { if (!gone() && !st.userZoom) fitWidth(); });
+  ro.observe(pagesEl);
   zoomIn.addEventListener('click', () => (st.userZoom = true));
   zoomOut.addEventListener('click', () => (st.userZoom = true));
 
@@ -174,13 +198,16 @@ async function setupEditor(ctx, signMode) {
   if (signMode) drawSigs();
 
   // Colour dots plus a "custom" dot that opens the system picker.
+  // onPick(colour, quiet): quiet is true for the 2nd, 3rd… live update while
+  // the picker is being dragged, so one pick is one undo step.
   const swatches = (value, palette, onPick) => {
     const wrap = h('div', { class: 'dots', role: 'radiogroup', 'aria-label': 'Colour' });
     const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+    let live = false;
     const draw = (v) => wrap.replaceChildren(
-      ...palette.map((c) => h('button', { type: 'button', class: 'dot' + (same(c, v) ? ' on' : ''), style: { background: c }, role: 'radio', 'aria-checked': String(same(c, v)), 'aria-label': c, onclick: () => { onPick(c); draw(c); } })),
+      ...palette.map((c) => h('button', { type: 'button', class: 'dot' + (same(c, v) ? ' on' : ''), style: { background: c }, role: 'radio', 'aria-checked': String(same(c, v)), 'aria-label': c, onclick: () => { onPick(c, false); draw(c); } })),
       h('label', { class: 'dot dot--custom' + (palette.some((c) => same(c, v)) ? '' : ' on'), title: 'Custom colour', style: { '--v': v } },
-        h('input', { type: 'color', value: v, 'aria-label': 'Custom colour', oninput: (e) => onPick(e.target.value), onchange: (e) => draw(e.target.value) })));
+        h('input', { type: 'color', value: v, 'aria-label': 'Custom colour', oninput: (e) => { onPick(e.target.value, live); live = true; }, onchange: (e) => { if (!live) onPick(e.target.value, false); live = false; draw(e.target.value); } })));
     draw(value);
     return wrap;
   };
@@ -195,7 +222,7 @@ async function setupEditor(ctx, signMode) {
     const kids = [];
     if (type === 'text') {
       const t = o || st.text;
-      const set = (k, v) => { if (o) { snapshot(); o[k] = v; restyle(o); } st.text[k] = v; };
+      const set = (k, v, quiet) => { if (o) { if (!quiet) snapshot(); o[k] = v; restyle(o); } st.text[k] = v; };
       const align = t.align || 'left';
       kids.push(
         h('h3', { class: 'props__title' }, o?.orig ? 'Text from the PDF' : 'Text properties'),
@@ -204,21 +231,21 @@ async function setupEditor(ctx, signMode) {
         h('div', { class: 'row2' },
           field2('Font size', h('div', { class: 'unit' }, h('input', { class: 'field', type: 'number', min: 6, max: 144, step: 0.5, value: t.size, 'aria-label': 'Font size', onchange: (e) => set('size', Math.min(144, Math.max(6, +e.target.value || 14))) }), h('span', {}, 'pt'))),
           field2('Style', h('button', { type: 'button', class: 'btn btn--soft btn--block' + (t.bold ? ' on' : ''), 'aria-pressed': String(!!t.bold), onclick: (e) => { set('bold', !t.bold); e.currentTarget.classList.toggle('on'); } }, h('b', {}, 'B'), 'Bold'))),
-        field2('Text color', swatches(t.color, INK, (c) => set('color', c))),
+        field2('Text color', swatches(t.color, INK, (c, quiet) => set('color', c, quiet))),
         field2('Alignment', h('div', { class: 'seg seg--icons' }, [['left', 'alignLeft', 'Left'], ['center', 'alignCenter', 'Center'], ['right', 'alignRight', 'Right']].map(([v, ic, label]) =>
           h('button', { type: 'button', class: v === align ? 'on' : '', 'aria-pressed': String(v === align), onclick: () => { set('align', v); drawProps(); } }, icon(ic), label)))));
     } else if (type === 'path') {
       const t = o || st.pen;
       kids.push(h('h3', { class: 'props__title' }, 'Pen'),
-        field2('Ink color', swatches(t.color, INK, (c) => { st.pen.color = c; if (o) { o.color = c; restyle(o); } })),
+        field2('Ink color', swatches(t.color, INK, (c, quiet) => { st.pen.color = c; if (o) { if (!quiet) snapshot(); o.color = c; restyle(o); } })),
         field2('Thickness', h('div', { class: 'seg' }, [[1, 'Thin'], [2, 'Normal'], [4, 'Thick'], [8, 'Marker']].map(([v, l]) =>
-          h('button', { type: 'button', class: v === t.width ? 'on' : '', onclick: () => { st.pen.width = v; if (o) { o.width = v; restyle(o); } drawProps(); } }, l)))));
+          h('button', { type: 'button', class: v === t.width ? 'on' : '', onclick: () => { st.pen.width = v; if (o) { snapshot(); o.width = v; restyle(o); } drawProps(); } }, l)))));
     } else if (type === 'rect') {
       const which = o ? o.kind : st.tool;
       const hl = which === 'highlight';
       const t = o || (hl ? st.mark : st.white);
       kids.push(h('h3', { class: 'props__title' }, hl ? 'Highlight' : 'White-out'),
-        field2(hl ? 'Marker color' : 'Cover color', swatches(t.color, hl ? MARK : PAPER, (c) => { (hl ? st.mark : st.white).color = c; if (o) { o.color = c; restyle(o); } })),
+        field2(hl ? 'Marker color' : 'Cover color', swatches(t.color, hl ? MARK : PAPER, (c, quiet) => { (hl ? st.mark : st.white).color = c; if (o) { if (!quiet) snapshot(); o.color = c; restyle(o); } })),
         !o && h('p', { class: 'muted small' }, 'Drag across the page to draw the box.'));
     } else if (o?.type === 'image') {
       kids.push(h('h3', { class: 'props__title' }, o.kind === 'sig' ? 'Signature' : 'Image'),
@@ -226,7 +253,14 @@ async function setupEditor(ctx, signMode) {
     }
     if (!o && st.tool === 'edittext') kids.push(h('h3', { class: 'props__title' }, 'Edit text'), h('p', { class: 'muted small' }, 'Every piece of text in the PDF has a box around it. Click one to type over it, or drag it somewhere else. To delete it, click it and clear the text. Scanned pages have no text to edit.'));
     if (!o && st.tool === 'select' && !signMode) kids.push(h('h3', { class: 'props__title' }, 'Select'), h('p', { class: 'muted small' }, 'Click something you added to move, resize or change it.'));
-    if (o) kids.push(h('button', { class: 'btn btn--soft btn--block danger', onclick: () => remove(o) }, icon('trash'), 'Delete'));
+    // Without a mouse: put the signature, image or new text in the middle of
+    // the page in view (then move it with the arrow keys).
+    if (!o && (st.pending || st.tool === 'text' || st.tool === 'date')) {
+      kids.push(h('button', { class: 'btn btn--soft btn--block ed-place', onclick: () => placeCentre() }, icon('plus'),
+        st.pending ? (st.pending.kind === 'sig' ? 'Place signature on this page' : 'Place image on this page') : 'Add text on this page'));
+    }
+    if (o) kids.push(h('p', { class: 'muted small' }, 'Arrow keys move it (Shift for bigger steps).'),
+      h('button', { class: 'btn btn--soft btn--block danger', onclick: () => remove(o) }, icon('trash'), 'Delete'));
     props.replaceChildren(...kids);
   }
 
@@ -295,7 +329,9 @@ async function setupEditor(ctx, signMode) {
   function readText(i) {
     if (st.texts[i]) return st.texts[i];
     st.texts[i] = (async () => {
-      st.lib ||= await loadLib(doc);
+      // One pdf-lib copy for all pages: several pages are read at once.
+      st.libP ||= loadLib(doc);
+      st.lib = await st.libP;
       const page = await doc.js.getPage(i + 1);
       const tc = await page.getTextContent();
       await page.getOperatorList(); // makes the fonts' real names available
@@ -330,7 +366,15 @@ async function setupEditor(ctx, signMode) {
     layer.querySelectorAll('.tx').forEach((b) => b.remove());
     for (const it of items) {
       if (!it.upright || !it.str.trim() || st.removed.has(it.key)) continue;
-      const b = h('div', { class: 'tx', 'data-key': it.key, title: 'Click to edit, drag to move', 'aria-label': it.str });
+      const b = h('div', {
+        class: 'tx', 'data-key': it.key, title: 'Click to edit, drag to move', 'aria-label': it.str, 'aria-roledescription': 'editable text', role: 'button', tabindex: '0',
+        // Keyboard: Enter or Space turns it into editable text, like a click.
+        onkeydown: (e) => {
+          if ((e.key !== 'Enter' && e.key !== ' ') || st.tool !== 'edittext') return;
+          e.preventDefault();
+          takeText(i, it.key).then((o) => editText(o));
+        },
+      });
       b.box = it.box;
       layer.prepend(b);
       placeBox(b);
@@ -392,7 +436,7 @@ async function setupEditor(ctx, signMode) {
     st.removed = prev.removed;
     st.objects.forEach((o) => { make(o); place(o); });
     drawMasks();
-    st.texts.forEach((t, i) => t && showBoxes(i));
+    st.texts.forEach((t, i) => t && showBoxes(i).catch(textFailed));
     select(null);
   }
   function add(o) {
@@ -427,6 +471,17 @@ async function setupEditor(ctx, signMode) {
       el.innerHTML = '<svg preserveAspectRatio="none"><polyline fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     }
     el.dataset.id = o.id;
+    // Reachable by Tab: focus selects it, Enter edits text, arrows move it
+    // and Delete removes it (see onKey).
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.setAttribute('aria-label', o.type === 'text' ? `Text: ${o.text || 'empty'}` : o.kind === 'sig' ? 'Signature' : o.type === 'image' ? 'Image' : o.type === 'path' ? 'Drawing' : o.kind === 'highlight' ? 'Highlight' : 'White-out');
+    el.addEventListener('focus', () => { if (st.selected !== o.id && st.editing !== o.id) select(o.id); });
+    el.addEventListener('keydown', (e) => {
+      if (st.editing === o.id || e.key !== 'Enter' || o.type !== 'text') return;
+      e.preventDefault();
+      editText(o);
+    });
     el.append(h('span', { class: 'obj__h', 'data-h': 'se' }));
     pageEls[o.page].layer.append(el);
     els.set(o.id, el);
@@ -498,8 +553,47 @@ async function setupEditor(ctx, signMode) {
     measure(o);
   }
 
+  /* placing things (by pointer, or in the middle of the page for keyboards) */
+  function placePending(page, p, focus = false) {
+    const { src, kind } = st.pending;
+    const { w: PW, h: PH } = sizes[page];
+    const img = new Image();
+    img.onload = () => {
+      const ratio = img.naturalHeight / img.naturalWidth || 0.4;
+      const w = Math.min(kind === 'sig' ? 160 : 220, PW * 0.6);
+      const hh = w * ratio;
+      const o = add({ type: 'image', page, src, kind, x: clamp(p.x - w / 2, 0, PW - w), y: clamp(p.y - hh / 2, 0, PH - hh), w, h: hh });
+      st.pending = null;
+      syncTools();
+      select(o.id);
+      if (focus) els.get(o.id)?.focus();
+    };
+    img.src = src;
+  }
+  function addTextAt(page, p) {
+    const t = st.text;
+    const date = st.tool === 'date';
+    const o = add({ type: 'text', page, text: date ? new Date().toLocaleDateString() : '', font: t.font, size: t.size, color: t.color, bold: t.bold, align: t.align, x: p.x, y: p.y - (t.size * LH) / 2 });
+    if (date) { measure(o); select(o.id); }
+    else setTimeout(() => editText(o), 0);
+    st.tool = 'select';
+    syncTools();
+    select(o.id);
+    return o;
+  }
+  function placeCentre() {
+    const page = st.curPage || 0;
+    const p = { x: sizes[page].w / 2, y: sizes[page].h / 2 };
+    if (st.pending) placePending(page, p, true);
+    else if (st.tool === 'text' || st.tool === 'date') {
+      const date = st.tool === 'date';
+      const o = addTextAt(page, { x: p.x - 40, y: p.y });
+      if (date) els.get(o.id)?.focus(); // new text gets the caret instead
+    }
+  }
+
   /* pointer handling on the pages */
-  const pt = (layer, e) => { const r = layer.getBoundingClientRect(); return { x: (e.clientX - r.left) / st.scale, y: (e.clientY - r.top) / st.scale }; };
+  const pt =(layer, e) => { const r = layer.getBoundingClientRect(); return { x: (e.clientX - r.left) / st.scale, y: (e.clientY - r.top) / st.scale }; };
 
   pagesEl.addEventListener('pointerdown', (e) => {
     const layer = e.target.closest('.ed-layer');
@@ -512,18 +606,7 @@ async function setupEditor(ctx, signMode) {
     // Placing a signature or image.
     if (st.pending) {
       e.preventDefault();
-      const { src, kind } = st.pending;
-      const img = new Image();
-      img.onload = () => {
-        const ratio = img.naturalHeight / img.naturalWidth || 0.4;
-        const w = Math.min(kind === 'sig' ? 160 : 220, PW * 0.6);
-        const hh = w * ratio;
-        const o = add({ type: 'image', page, src, kind, x: clamp(p.x - w / 2, 0, PW - w), y: clamp(p.y - hh / 2, 0, PH - hh), w, h: hh });
-        st.pending = null;
-        syncTools();
-        select(o.id);
-      };
-      img.src = src;
+      placePending(page, p);
       return;
     }
 
@@ -588,14 +671,7 @@ async function setupEditor(ctx, signMode) {
 
     if (st.tool === 'text' || st.tool === 'date') {
       e.preventDefault();
-      const t = st.text;
-      const text = st.tool === 'date' ? new Date().toLocaleDateString() : '';
-      const o = add({ type: 'text', page, text, font: t.font, size: t.size, color: t.color, bold: t.bold, align: t.align, x: p.x, y: p.y - (t.size * LH) / 2 });
-      if (st.tool === 'date') { measure(o); select(o.id); }
-      else setTimeout(() => editText(o), 0);
-      st.tool = 'select';
-      syncTools();
-      select(o.id);
+      addTextAt(page, p);
       return;
     }
 
@@ -645,11 +721,27 @@ async function setupEditor(ctx, signMode) {
 
   document.addEventListener('keydown', onKey);
   function onKey(e) {
-    if (!document.body.contains(pagesEl)) { document.removeEventListener('keydown', onKey); return; }
-    if (st.editing || e.target.closest?.('input, select, textarea')) return;
-    if ((e.key === 'Delete' || e.key === 'Backspace') && st.selected) { e.preventDefault(); remove(st.objects.find((o) => o.id === st.selected)); }
+    if (gone()) return;
+    // Keys pressed in a dialog (signature, password…) are the dialog's.
+    if (document.querySelector('.modal') || e.target.closest?.('.modal')) return;
+    if (st.editing || e.target.closest?.('input, select, textarea, [contenteditable="plaintext-only"], [contenteditable="true"]')) return;
+    const sel = st.selected && st.objects.find((o) => o.id === st.selected);
+    const onPage = e.target === document.body || pagesEl.contains(e.target);
+    if ((e.key === 'Delete' || e.key === 'Backspace') && sel) { e.preventDefault(); remove(sel); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
     else if (e.key === 'Escape') { st.pending = null; st.tool = 'select'; select(null); syncTools(); }
+    else if (sel && onPage && e.key.startsWith('Arrow')) {
+      // Nudge: one undo step per burst of key presses.
+      e.preventDefault();
+      if (st.nudged !== sel.id || Date.now() - st.nudgedAt > 1000) snapshot();
+      st.nudged = sel.id; st.nudgedAt = Date.now();
+      const d = e.shiftKey ? 10 : 1, { w: PW, h: PH } = sizes[sel.page];
+      if (e.key === 'ArrowLeft') sel.x -= d; else if (e.key === 'ArrowRight') sel.x += d;
+      else if (e.key === 'ArrowUp') sel.y -= d; else if (e.key === 'ArrowDown') sel.y += d;
+      sel.x = clamp(sel.x, -(sel.w || 0) / 2, PW - (sel.w || 0) / 2);
+      sel.y = clamp(sel.y, -(sel.h || 0) / 2, PH - (sel.h || 0) / 2);
+      place(sel);
+    }
   }
 
   fitWidth();
@@ -869,11 +961,14 @@ function signatureDialog() {
         onclick: (e) => { tab = id; tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === e.currentTarget)); Object.entries(panes).forEach(([k, p]) => (p.hidden = k !== id)); colors.hidden = id === 'upload'; if (id === 'draw') setTimeout(sizePad, 0); },
       }, label)));
 
+      // Nothing to use yet: say so and keep the dialog open.
+      const hint = h('p', { class: 'sig-hint', role: 'alert', hidden: true });
+      const nothing = (msg) => { hint.textContent = msg; hint.hidden = false; return STAY; };
       m.value = async () => {
         let c;
-        if (tab === 'draw') { if (!drawn) return null; c = pad; }
+        if (tab === 'draw') { if (!drawn) return nothing('Sign in the box first.'); c = pad; }
         else if (tab === 'type') {
-          if (!typed.trim()) return null;
+          if (!typed.trim()) return nothing('Type your name first.');
           await document.fonts.load(`120px "${face}"`);
           c = document.createElement('canvas');
           const x = c.getContext('2d');
@@ -881,10 +976,10 @@ function signatureDialog() {
           c.width = Math.ceil(x.measureText(typed).width + 80); c.height = 220;
           x.font = `120px "${face}", cursive`; x.fillStyle = color; x.textBaseline = 'middle';
           x.fillText(typed, 40, 115);
-        } else { if (!prev.canvas) return null; c = prev.canvas; }
-        return trimCanvas(c)?.toDataURL('image/png') || null;
+        } else { if (!prev.canvas) return nothing('Choose an image of your signature first.'); c = prev.canvas; }
+        return trimCanvas(c)?.toDataURL('image/png') || nothing('That image is blank. Try another one, or untick “Remove white background”.');
       };
-      return [tabs, colors, panes.draw, panes.type, panes.upload];
+      return [tabs, colors, panes.draw, panes.type, panes.upload, hint];
     },
   }).then((v) => v);
 }

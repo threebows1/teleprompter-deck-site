@@ -127,7 +127,15 @@ const split = {
       (await out.copyPages(src, indexes)).forEach((p) => out.addPage(p));
       return out.save();
     };
-    const label = (ix) => (ix.length === 1 ? `${ix[0] + 1}` : `${ix[0] + 1}-${ix[ix.length - 1] + 1}`);
+    // Runs of consecutive pages joined by "_": [0,1,2,4] -> "1-3_5", [2,1,0] -> "3-1".
+    const label = (ix) => {
+      const runs = [];
+      for (const i of ix) {
+        const r = runs[runs.length - 1];
+        if (r && (r.step ? i === r.b + r.step : Math.abs(i - r.b) === 1)) { r.step ||= i - r.b; r.b = i; } else runs.push({ a: i, b: i, step: 0 });
+      }
+      return runs.map((r) => (r.a === r.b ? `${r.a + 1}` : `${r.a + 1}-${r.b + 1}`)).join('_');
+    };
     let groups;
     if (s.mode === 'every') groups = src.getPageIndices().map((i) => [i]);
     else if (s.mode === 'pick') groups = [[...s.picked].sort((a, b) => a - b)];
@@ -273,13 +281,21 @@ const compress = {
 // Re-encodes photos inside the PDF as smaller JPEGs. Vector text and drawings
 // aren't touched. Images we can't decode safely are left as they are.
 export async function shrinkImages(lib, { maxSide, quality }, progress) {
-  const { PDFName, PDFNumber, PDFRawStream, decodePDFRawStream } = window.PDFLib;
+  const { PDFName, PDFNumber, PDFRawStream, PDFRef, decodePDFRawStream } = window.PDFLib;
   const N = (n) => PDFName.of(n);
   const jobs = [];
+  // Soft masks and stencil masks are images too, but they must stay 1-channel
+  // and lossless; turning them into RGB JPEGs makes the masked image vanish.
+  const masks = new Set();
+  for (const [, obj] of lib.context.enumerateIndirectObjects()) {
+    const d = obj?.dict;
+    if (!d || d.get(N('Subtype'))?.toString() !== '/Image') continue;
+    for (const key of ['SMask', 'Mask']) { const v = d.get(N(key)); if (v instanceof PDFRef) masks.add(v.toString()); }
+  }
   for (const [ref, obj] of lib.context.enumerateIndirectObjects()) {
     if (!(obj instanceof PDFRawStream)) continue;
     const d = obj.dict;
-    if (d.get(N('Subtype'))?.toString() !== '/Image') continue;
+    if (d.get(N('Subtype'))?.toString() !== '/Image' || masks.has(ref.toString())) continue;
     if (d.get(N('ImageMask'))?.toString() === 'true' || d.has(N('Decode')) || d.has(N('Mask'))) continue;
     const w = d.get(N('Width'))?.asNumber?.();
     const hgt = d.get(N('Height'))?.asNumber?.();
@@ -290,18 +306,20 @@ export async function shrinkImages(lib, { maxSide, quality }, progress) {
   for (const [k, job] of jobs.entries()) {
     if (k % 3 === 0) { progress(k + 1, jobs.length); await tick(); }
     try {
-      const img = await decodeImage(job.obj, job.w, job.hgt, { PDFName, decodePDFRawStream });
+      const img = await decodeImage(job.obj, job.w, job.hgt, window.PDFLib);
       if (!img) continue;
       const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
       const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(img.width * scale));
-      c.height = Math.max(1, Math.round(img.height * scale));
+      const cw = c.width = Math.max(1, Math.round(img.width * scale));
+      const ch = c.height = Math.max(1, Math.round(img.height * scale));
       const cx = c.getContext('2d');
       cx.fillStyle = '#fff';
-      cx.fillRect(0, 0, c.width, c.height);
-      cx.drawImage(img, 0, 0, c.width, c.height);
+      cx.fillRect(0, 0, cw, ch);
+      cx.drawImage(img, 0, 0, cw, ch);
       img.close?.();
       const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', quality));
+      c.width = c.height = 0;
+      if (!blob) throw new Error(`image ${job.ref} is too large to re-encode on this device`);
       const jpg = new Uint8Array(await blob.arrayBuffer());
       if (jpg.byteLength >= job.obj.contents.byteLength * 0.9) continue;
       const nd = job.obj.dict.clone(lib.context);
@@ -309,8 +327,8 @@ export async function shrinkImages(lib, { maxSide, quality }, progress) {
       nd.set(N('Filter'), N('DCTDecode'));
       nd.set(N('ColorSpace'), N('DeviceRGB'));
       nd.set(N('BitsPerComponent'), PDFNumber.of(8));
-      nd.set(N('Width'), PDFNumber.of(c.width));
-      nd.set(N('Height'), PDFNumber.of(c.height));
+      nd.set(N('Width'), PDFNumber.of(cw));
+      nd.set(N('Height'), PDFNumber.of(ch));
       lib.context.assign(job.ref, PDFRawStream.of(nd, jpg));
       done++;
     } catch (err) { console.warn('kept image', err); }
@@ -318,35 +336,118 @@ export async function shrinkImages(lib, { maxSide, quality }, progress) {
   return { done, total: jobs.length };
 }
 
-async function decodeImage(stream, w, hgt, { PDFName, decodePDFRawStream }) {
+const RAW_FILTERS = ['/FlateDecode', '/LZWDecode', '/ASCII85Decode', '/ASCIIHexDecode', '/RunLengthDecode'];
+const filtersOf = (d, N) => { const f = d.get(N('Filter')); return f ? (f.asArray ? f.asArray().map(String) : [String(f)]) : []; };
+
+// Undoes PNG predictors (Predictor 10-15): every row starts with a filter
+// byte. pdf-lib's decoder leaves them in. TIFF predictor 2 is not handled.
+function unpredict(data, parms, N) {
+  const num = (k, dflt) => parms?.get?.(N(k))?.asNumber?.() ?? dflt;
+  const pred = num('Predictor', 1);
+  if (pred < 2) return data;
+  if (pred < 10) return null;
+  const colors = num('Colors', 1), bpc = num('BitsPerComponent', 8), cols = num('Columns', 1);
+  const bpp = Math.max(1, Math.ceil((colors * bpc) / 8));
+  const rowLen = Math.ceil((colors * bpc * cols) / 8);
+  const rows = Math.floor(data.length / (rowLen + 1));
+  const out = new Uint8Array(rows * rowLen);
+  let prev = new Uint8Array(rowLen);
+  for (let r = 0; r < rows; r++) {
+    const s = r * (rowLen + 1) + 1, o = r * rowLen, type = data[s - 1];
+    for (let i = 0; i < rowLen; i++) {
+      const x = data[s + i], a = i >= bpp ? out[o + i - bpp] : 0, b = prev[i], c = i >= bpp ? prev[i - bpp] : 0;
+      let v;
+      if (type === 0) v = x;
+      else if (type === 1) v = x + a;
+      else if (type === 2) v = x + b;
+      else if (type === 3) v = x + ((a + b) >> 1);
+      else if (type === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v = x + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c); }
+      else return null;
+      out[o + i] = v & 255;
+    }
+    prev = out.subarray(o, o + rowLen);
+  }
+  return out;
+}
+
+// Exactly w*hgt*comps bytes of 8-bit samples from a Flate/LZW/... image, or null.
+function rawPixels(stream, w, hgt, comps, { PDFName, PDFDict, decodePDFRawStream }) {
   const N = (n) => PDFName.of(n);
   const d = stream.dict;
-  const filter = d.get(N('Filter'));
-  const filters = filter ? (filter.asArray ? filter.asArray().map(String) : [String(filter)]) : [];
+  const filters = filtersOf(d, N);
+  if (filters.some((f) => !RAW_FILTERS.includes(f))) return null;
+  if ((d.get(N('BitsPerComponent'))?.asNumber?.() ?? 8) !== 8) return null;
+  let parms = d.lookup(N('DecodeParms')) ?? d.lookup(N('DP'));
+  if (parms?.asArray) {
+    const k = filters.findIndex((f) => f === '/FlateDecode' || f === '/LZWDecode');
+    parms = k < 0 ? undefined : d.context.lookup(parms.asArray()[k]);
+  }
+  const data = unpredict(decodePDFRawStream(stream).decode(), parms instanceof PDFDict ? parms : undefined, N);
+  return data && data.length === w * hgt * comps ? data : null;
+}
+
+function componentsOf(d, N) {
   const cs = d.lookup(N('ColorSpace'));
   const csName = cs?.asArray ? String(cs.asArray()[0]) : String(cs);
-  let comps = csName === '/DeviceGray' || csName === '/CalGray' ? 1 : csName === '/DeviceRGB' || csName === '/CalRGB' ? 3 : 0;
-  if (csName === '/ICCBased') {
-    const iccN = cs.asArray()[1];
-    const icc = d.context.lookup(iccN);
-    comps = icc?.dict?.get(N('N'))?.asNumber?.() || 0;
+  if (csName === '/ICCBased') return d.context.lookup(cs.asArray()[1])?.dict?.get(N('N'))?.asNumber?.() || 0;
+  return csName === '/DeviceGray' || csName === '/CalGray' ? 1 : csName === '/DeviceRGB' || csName === '/CalRGB' ? 3 : 0;
+}
+
+// A simple soft mask (8-bit gray, same size, no Matte/Decode) as alpha bytes, or null.
+function softMaskAlpha(d, w, hgt, ns) {
+  const N = (n) => ns.PDFName.of(n);
+  const sm = d.lookup(N('SMask'));
+  if (!(sm instanceof ns.PDFRawStream)) return null;
+  const md = sm.dict;
+  if (md.has(N('Matte')) || md.has(N('Decode')) || componentsOf(md, N) !== 1) return null;
+  if (md.get(N('Width'))?.asNumber?.() !== w || md.get(N('Height'))?.asNumber?.() !== hgt) return null;
+  try { return rawPixels(sm, w, hgt, 1, ns); } catch { return null; }
+}
+
+// Decodes an image XObject into an ImageBitmap the size of its /Width × /Height,
+// or null for kinds we don't handle (CMYK, indexed, 16-bit, odd /Decode...).
+// alpha: optional w*hgt alpha bytes (from softMaskAlpha).
+async function decodeImage(stream, w, hgt, ns, { alpha = null } = {}) {
+  const N = (n) => ns.PDFName.of(n);
+  const d = stream.dict;
+  const filters = filtersOf(d, N);
+  const comps = componentsOf(d, N);
+  if (comps !== 1 && comps !== 3) return null;
+  // /Decode: the default is fine, an inverted gray image we flip, others we skip.
+  let invert = false;
+  const dec = d.lookup(N('Decode'))?.asArray?.().map((x) => x.asNumber?.());
+  if (dec) {
+    if (dec.length === 2 * comps && dec.every((v, i) => v === i % 2)) invert = false;
+    else if (comps === 1 && dec[0] === 1 && dec[1] === 0) invert = true;
+    else return null;
   }
-  // Photos already stored as JPEG: let the browser decode them (RGB/gray only).
+  let rgba;
   if (filters.length === 1 && filters[0] === '/DCTDecode') {
-    if (comps !== 1 && comps !== 3) return null;
-    return createImageBitmap(new Blob([stream.contents], { type: 'image/jpeg' }));
+    // PDF readers ignore EXIF orientation, so must we.
+    const bmp = await createImageBitmap(new Blob([stream.contents], { type: 'image/jpeg' }), { imageOrientation: 'none' });
+    if (bmp.width !== w || bmp.height !== hgt) { bmp.close(); return null; }
+    if (!invert && !alpha) return bmp;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = hgt;
+    const cx = c.getContext('2d');
+    cx.drawImage(bmp, 0, 0);
+    bmp.close();
+    rgba = cx.getImageData(0, 0, w, hgt).data;
+    c.width = c.height = 0;
+  } else {
+    const data = rawPixels(stream, w, hgt, comps, ns);
+    if (!data) return null;
+    rgba = new Uint8ClampedArray(w * hgt * 4);
+    for (let p = 0, q = 0; p < w * hgt; p++, q += comps) {
+      const o = p * 4;
+      rgba[o] = data[q]; rgba[o + 1] = data[comps === 3 ? q + 1 : q]; rgba[o + 2] = data[comps === 3 ? q + 2 : q]; rgba[o + 3] = 255;
+    }
   }
-  // Raw pixels (Flate etc.): only plain 8-bit gray or RGB.
-  if (filters.some((f) => !['/FlateDecode', '/LZWDecode', '/ASCII85Decode', '/ASCIIHexDecode', '/RunLengthDecode'].includes(f))) return null;
-  if ((d.get(N('BitsPerComponent'))?.asNumber?.() ?? 8) !== 8 || (comps !== 1 && comps !== 3)) return null;
-  const data = decodePDFRawStream(stream).decode();
-  if (data.length < w * hgt * comps) return null;
-  const rgba = new Uint8ClampedArray(w * hgt * 4);
-  for (let p = 0, q = 0; p < w * hgt; p++, q += comps) {
-    const o = p * 4;
-    rgba[o] = data[q]; rgba[o + 1] = data[comps === 3 ? q + 1 : q]; rgba[o + 2] = data[comps === 3 ? q + 2 : q]; rgba[o + 3] = 255;
+  if (invert || alpha) for (let p = 0, o = 0; p < w * hgt; p++, o += 4) {
+    if (invert) { rgba[o] = 255 - rgba[o]; rgba[o + 1] = 255 - rgba[o + 1]; rgba[o + 2] = 255 - rgba[o + 2]; }
+    if (alpha) rgba[o + 3] = alpha[p];
   }
-  return createImageBitmap(new ImageData(rgba, w, hgt));
+  return createImageBitmap(new ImageData(rgba, w, hgt), { premultiplyAlpha: 'none' });
 }
 
 /* ---------- JPG -> PDF ---------- */
@@ -365,7 +466,7 @@ const jpgToPdf = {
       list.replaceChildren(...ctx.items.map((it) => h('div', { class: 'card', 'data-id': it.uid },
         h('div', { class: 'card__page' }, h('img', { class: 'thumb', src: it.url, alt: '', style: { imageOrientation: 'from-image' } })),
         h('div', { class: 'card__meta' }, h('strong', { title: it.name }, it.name), h('span', {}, fmtSize(it.size))),
-        h('button', { class: 'iconbtn card__x', 'aria-label': `Remove ${it.name}`, onclick: () => { ctx.items.splice(ctx.items.indexOf(it), 1); draw(); } }, icon('x')),
+        h('button', { class: 'iconbtn card__x', 'aria-label': `Remove ${it.name}`, onclick: () => { ctx.items.splice(ctx.items.indexOf(it), 1); URL.revokeObjectURL(it.url); draw(); } }, icon('x')),
         h('span', { class: 'grip', title: 'Drag to reorder' }, icon('grip')))),
       h('button', { class: 'card card--add', onclick: add }, icon('plus'), 'Add images'));
       ctx.action.disabled = !ctx.items.length;
@@ -417,6 +518,8 @@ const jpgToPdf = {
 
 /* ---------- PDF -> JPG ---------- */
 
+const MAX_SIDE = 8192, MAX_PIXELS = 16e6;
+
 const pdfToJpg = {
   id: 'pdf-to-jpg', keywords: 'image png jpeg convert export extract pictures photos', title: 'PDF to JPG', icon: 'pdfToJpg', color: '#06b6d4', cat: 'convert', action: 'Convert to images', wide: true, busyText: 'Converting…',
   desc: 'Save pages as images, or pull out the pictures inside.',
@@ -457,19 +560,27 @@ const pdfToJpg = {
     const want = [...Array(doc.pages).keys()].filter((i) => !s.skip.has(i));
     if (s.mode === 'images') return this.extract(doc, want);
     const files = [];
+    const lowered = [];
     for (const [k, i] of want.entries()) {
       busy(`Page ${k + 1} of ${want.length}…`);
-      const c = await renderPage(doc.js, i, 0, { lazy: false, scale: s.dpi / 72 });
+      // Canvases have size limits (about 16 MP on phones): big pages get a lower resolution.
+      const pg = await doc.js.getPage(i + 1);
+      const vp = pg.getViewport({ scale: 1 });
+      const want0 = s.dpi / 72;
+      const scale = Math.min(want0, MAX_SIDE / vp.width, MAX_SIDE / vp.height, Math.sqrt(MAX_PIXELS / (vp.width * vp.height)));
+      if (scale < want0 * 0.999) lowered.push(i + 1);
+      const c = await renderPage(doc.js, i, 0, { lazy: false, scale });
       if (s.format === 'jpg') { // JPG has no transparency; keep paper white
-        const w = document.createElement('canvas'); w.width = c.width; w.height = c.height;
-        const x = w.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w.width, w.height); x.drawImage(c, 0, 0);
-        c.getContext('2d').drawImage(w, 0, 0);
+        const x = c.getContext('2d');
+        x.globalCompositeOperation = 'destination-over'; x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
       }
       const blob = await new Promise((r) => c.toBlob(r, s.format === 'jpg' ? 'image/jpeg' : 'image/png', 0.9));
       c.width = c.height = 0;
+      if (!blob) throw new Error(`Page ${i + 1} is too large to save as an image on this device. Try a lower quality.`);
       files.push({ name: `${baseName(doc.name)}-page-${i + 1}.${s.format}`, bytes: blob, type: blob.type });
     }
-    return { files, zipName: `${baseName(doc.name)}-images.zip`, title: files.length > 1 ? `${files.length} images are ready` : 'Your image is ready' };
+    const note = lowered.length ? `Page${lowered.length === 1 ? '' : 's'} ${lowered.length > 5 ? lowered.slice(0, 5).join(', ') + '…' : lowered.join(', ')} ${lowered.length === 1 ? 'is' : 'are'} too big for ${s.dpi} dpi, so ${lowered.length === 1 ? 'it was' : 'they were'} saved at a lower resolution.` : undefined;
+    return { files, note, zipName: `${baseName(doc.name)}-images.zip`, title: files.length > 1 ? `${files.length} images are ready` : 'Your image is ready' };
   },
   // Pulls the image objects out of the chosen pages (and the forms they
   // draw), each once. JPEGs are copied byte for byte; the rest go through
@@ -504,15 +615,23 @@ const pdfToJpg = {
       const w = d.get(N('Width'))?.asNumber?.() || 0;
       const hgt = d.get(N('Height'))?.asNumber?.() || 0;
       if (w < 40 || hgt < 40) continue;
-      const filter = d.get(N('Filter'));
-      const filters = filter ? (filter.asArray ? filter.asArray().map(String) : [String(filter)]) : [];
+      const filters = filtersOf(d, N);
       const name = `${baseName(doc.name)}-image-${files.length + 1}`;
-      if (filters.length === 1 && filters[0] === '/DCTDecode') {
+      const jpeg = filters.length === 1 && filters[0] === '/DCTDecode';
+      let alpha = null;
+      try { alpha = softMaskAlpha(d, w, hgt, window.PDFLib); } catch { /* no transparency then */ }
+      // Plain JPEGs are copied as they are; with a soft mask or an inverting
+      // /Decode they go through decodeImage and come out as PNG.
+      if (jpeg && !alpha && !d.has(N('Decode'))) {
         files.push({ name: name + '.jpg', bytes: obj.contents, type: 'image/jpeg' });
         continue;
       }
       let img = null;
-      try { img = d.get(N('ImageMask'))?.toString() === 'true' ? null : await decodeImage(obj, w, hgt, window.PDFLib); } catch (err) { console.warn('skipped image', err); }
+      try { img = d.get(N('ImageMask'))?.toString() === 'true' ? null : await decodeImage(obj, w, hgt, window.PDFLib, { alpha }); } catch (err) { console.warn('skipped image', err); }
+      if (!img && jpeg) { // e.g. CMYK: the stored JPEG still opens in image viewers
+        files.push({ name: name + '.jpg', bytes: obj.contents, type: 'image/jpeg' });
+        continue;
+      }
       if (!img) { skipped++; continue; }
       const c = document.createElement('canvas');
       c.width = img.width; c.height = img.height;
@@ -520,6 +639,7 @@ const pdfToJpg = {
       img.close?.();
       const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
       c.width = c.height = 0;
+      if (!blob) { skipped++; continue; }
       files.push({ name: name + '.png', bytes: blob, type: 'image/png' });
     }
     if (!files.length) throw new Error(skipped ? 'The images on these pages are in a kind this tool can’t save yet.' : 'No pictures found on these pages. Try “Pages to images” instead.');
@@ -533,6 +653,21 @@ const pdfToJpg = {
 
 /* ---------- WATERMARK ---------- */
 
+// A "which pages" box that says under itself when it can't be read, and
+// keeps the action button off until it can.
+function pagesField(label, doc, placeholder, ctx, onChange) {
+  const err = h('p', { class: 'muted small bad', hidden: true });
+  const input = h('input', { class: 'field', placeholder, oninput: (e) => {
+    const v = e.target.value;
+    let msg = '';
+    if (v.trim()) { try { parseRanges(v, doc.pages); } catch (x) { msg = x.message; } }
+    err.textContent = msg; err.hidden = !msg;
+    ctx.action.disabled = !!msg;
+    onChange(v);
+  } });
+  return [field(label, input), err];
+}
+
 const POS9 = ['tl', 'tc', 'tr', 'ml', 'mc', 'mr', 'bl', 'bc', 'br'];
 
 const watermark = {
@@ -542,7 +677,12 @@ const watermark = {
   setup(ctx) {
     const doc = ctx.items[0];
     const s = ctx.state = { kind: 'text', text: 'CONFIDENTIAL', size: 60, color: '#e11d48', opacity: 0.3, angle: 45, pos: 'mc', tile: false, img: null, imgScale: 40, pages: '' };
-    const preview = previewPane(doc, (lib, idx) => stampWatermark(lib, idx, s));
+    const preview = previewPane(doc, (lib, idx, real) => {
+      let only = null;
+      try { if (s.pages.trim()) only = parseRanges(s.pages, doc.pages); } catch { /* shown under the field */ }
+      if (only && !only.includes(real)) return undefined; // this page won't be stamped
+      return stampWatermark(lib, idx, s);
+    });
     const up = () => preview.refresh();
     const posGrid = h('div', { class: 'pos9' }, POS9.map((p) => h('button', { type: 'button', class: p === s.pos ? 'on' : '', 'aria-label': p, onclick: (e) => { s.pos = p; posGrid.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === e.currentTarget)); up(); } })));
     const imgName = h('span', { class: 'muted small' }, 'No image chosen');
@@ -566,7 +706,7 @@ const watermark = {
       field('Angle', segmented([[0, '0°'], [45, '45°'], [90, '90°'], [-45, '−45°']], s.angle, (v) => { s.angle = v; up(); })),
       field('Position', posGrid),
       check('Repeat across the page', s.tile, (v) => { s.tile = v; posGrid.classList.toggle('off', v); up(); }),
-      field('Pages (empty = all)', h('input', { class: 'field', placeholder: `e.g. 1-${doc.pages}`, oninput: (e) => (s.pages = e.target.value) })));
+      ...pagesField('Pages (empty = all)', doc, `e.g. 1-${doc.pages}`, ctx, (v) => { s.pages = v; up(); }));
   },
   async run(ctx) {
     const doc = ctx.items[0];
@@ -651,13 +791,14 @@ const pageNumbers = {
       field('Style', h('select', { class: 'field', onchange: (e) => { s.format = e.target.value; up(); } },
         Object.keys(FORMATS).map((k) => h('option', { value: k, selected: k === s.format }, FORMATS[k](1, doc.pages))))),
       h('div', { class: 'row2' },
-        field('First number', h('input', { class: 'field', type: 'number', min: 0, value: 1, oninput: (e) => { s.start = parseInt(e.target.value, 10) || 0; up(); } })),
+        field('First number', h('input', { class: 'field', type: 'number', min: 0, value: 1, oninput: (e) => { s.start = Math.max(0, parseInt(e.target.value, 10) || 0); up(); } })),
         field('Text size', h('input', { class: 'field', type: 'number', min: 6, max: 48, value: s.size, oninput: (e) => { s.size = Math.min(48, Math.max(6, +e.target.value || 11)); up(); } }))),
       field('Colour', h('input', { type: 'color', class: 'swatch', value: s.color, oninput: (e) => { s.color = e.target.value; up(); } })),
-      field('Pages to number (empty = all)', h('input', { class: 'field', placeholder: `e.g. 2-${doc.pages}`, oninput: (e) => { s.pages = e.target.value; up(); } })));
+      ...pagesField('Pages to number (empty = all)', doc, `e.g. 2-${doc.pages}`, ctx, (v) => { s.pages = v; up(); }));
   },
   async run(ctx) {
     const doc = ctx.items[0];
+    if (ctx.state.pages.trim()) parseRanges(ctx.state.pages, doc.pages); // a range we can't read is an error, not "all pages"
     const lib = await loadLib(doc);
     await stampNumbers(lib, lib.getPageIndices(), ctx.state);
     return { files: [pdfOut(`${baseName(doc.name)}-numbered.pdf`, await lib.save())] };

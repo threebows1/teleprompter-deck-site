@@ -33,6 +33,12 @@ const safeUrl = (u) => (/^(https?:|mailto:|tel:)/i.test(u || '') ? u : null);
 
 // Everything the converters need from one page, in view points (top-left
 // origin, after /Rotate): text pieces with their style, links, picture areas.
+// Odd ToUnicode maps can yield control characters and lone surrogates, which
+// are not allowed in Word/PowerPoint/Excel XML.
+const clean = (t) => t
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, '')
+  .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+
 async function readPdfPage(doc, i, lib) {
   const page = await doc.js.getPage(i + 1);
   const vp = page.getViewport({ scale: 1 });
@@ -61,7 +67,7 @@ async function readPdfPage(doc, i, lib) {
     const name = fontName(page, it.fontName);
     const ops = it.own?.length ? it.own : it.parent >= 0 ? [it.parent] : [];
     const item = {
-      str: it.str, x: t[4], y: t[5], w: it.width, size,
+      str: clean(it.str), x: t[4], y: t[5], w: it.width, size,
       font: family(name, tc.styles[it.fontName]?.fontFamily),
       bold: /bold|black|heavy|semibold|demi/i.test(name), italic: /italic|oblique/i.test(name),
       color: it.color || '#000000', hidden: ops.some((k) => hidden.has(k)), ops, link: null,
@@ -414,6 +420,9 @@ function toNumber(s) {
   const pct = t.endsWith('%');
   if (pct) t = t.slice(0, -1).trim();
   if (!/^(\d{1,3}(,\d{3})+|\d+)(\.\d+)?$|^\.\d+$/.test(t) || /^0\d/.test(t)) return null;
+  // Over 15 digits loses precision in Excel; 10+ bare digits is an ID, card or phone number.
+  const digits = t.split('.')[0].replace(/,/g, '');
+  if (digits.length > 15 || (!/[,.]/.test(t) && !cur && !pct && digits.length >= 10)) return null;
   const commas = t.includes(',');
   const dec = (t.split('.')[1] || '').length;
   let v = parseFloat(t.replace(/,/g, ''));
@@ -908,7 +917,7 @@ function mdBlocks(pages, breaks) {
   return out;
 }
 
-const mdEsc = (t) => t.replace(/([\\`*_[\]<>|])/g, '\\$1');
+const mdEsc = (t) => t.replace(/([\\`*_~[\]<>|])/g, '\\$1');
 
 // Groups of runs that share a link, in order. A space at the end of a link
 // goes outside it, so it isn't underlined.
@@ -937,7 +946,8 @@ function mdInline(runs) {
     }).join('');
     if (!link) return inner;
     const [, lead, text, trail] = inner.match(/^(\s*)([\s\S]*?)(\s*)$/);
-    return `${lead}[${text}](${link.replace(/[()\s]/g, encodeURIComponent)})${trail}`;
+    // encodeURIComponent leaves ( and ) alone, and a ) would end the link early.
+    return `${lead}[${text}](${link.replace(/[()\s<>]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'))})${trail}`;
   }).join('');
 }
 
@@ -953,8 +963,9 @@ function toMarkdown(blocks) {
       // Header cells are bold already.
       text = [row(b.rows[0].map((c) => c.map((r) => ({ ...r, bold: false })))), `| ${b.right.map((r) => (r ? '---:' : '---')).join(' | ')} |`, ...b.rows.slice(1).map(row)].join('\n');
     } else {
-      // A paragraph that starts like a heading or a list item must not turn into one.
-      text = mdInline(b.runs).replace(/^(#{1,6}\s|[-+]\s)/, '\\$1').replace(/^(\d+)([.)]\s)/, '$1\\$2');
+      // A paragraph that starts like a heading, list item, rule (---) or setext
+      // underline (===) must not turn into one.
+      text = mdInline(b.runs).replace(/^(#{1,6}\s|[-+=])/, '\\$1').replace(/^(\d+)([.)]\s)/, '$1\\$2');
     }
     return (k && !tight ? '\n' : '') + text;
   });
@@ -1136,6 +1147,22 @@ function pageProblem(lib, page) {
     if (fonts instanceof PL.PDFDict) for (const [, f] of fonts.entries()) { const fd = ctx.lookup(f); if (fd instanceof PL.PDFDict && !fontEmbedded(fd)) why = 'font'; }
     const cs = R.lookup(N('ColorSpace'));
     if (cs instanceof PL.PDFDict) for (const [, c] of cs.entries()) if (/DeviceCMYK/.test(String(ctx.lookup(c)))) why ||= 'cmyk';
+    // Shadings and patterns carry their own colour spaces.
+    const cmykShading = (ref) => {
+      const sh = ctx.lookup(ref);
+      const d = sh instanceof PL.PDFStream ? sh.dict : sh;
+      if (d instanceof PL.PDFDict && /DeviceCMYK/.test(String(d.lookup(N('ColorSpace'))))) why ||= 'cmyk';
+    };
+    const shadings = R.lookup(N('Shading'));
+    if (shadings instanceof PL.PDFDict) for (const [, sh] of shadings.entries()) cmykShading(sh);
+    const patterns = R.lookup(N('Pattern'));
+    if (patterns instanceof PL.PDFDict) for (const [, ref] of patterns.entries()) {
+      const pat = ctx.lookup(ref);
+      const d = pat instanceof PL.PDFStream ? pat.dict : pat;
+      if (!(d instanceof PL.PDFDict)) continue;
+      if (d.has(N('Shading'))) cmykShading(d.get(N('Shading')));
+      if (pat instanceof PL.PDFStream) { content(pat); res(d.get(N('Resources'))); }
+    }
     const xo = R.lookup(N('XObject'));
     if (xo instanceof PL.PDFDict) for (const [, ref] of xo.entries()) {
       const x = ctx.lookup(ref);
@@ -1186,6 +1213,16 @@ async function pageToImage(lib, page, js, i) {
     if (!link) gone.add(String(r));
     return link;
   });
+  // The new page is the old one as seen (rotation and box origin applied), so
+  // each link's rectangle moves the same way.
+  for (const r of keep) {
+    const a = ctx.lookup(r);
+    const rect = a?.lookup?.(N('Rect'))?.asArray?.().map((v) => v.asNumber?.() ?? 0);
+    if (!rect || rect.length !== 4) continue;
+    const [x1, y1, x2, y2] = vp.convertToViewportRectangle(rect);
+    a.set(N('Rect'), ctx.obj([Math.min(x1, x2), vp.height - Math.max(y1, y2), Math.max(x1, x2), vp.height - Math.min(y1, y2)]));
+    a.delete(N('QuadPoints'));
+  }
   node.set(N('Annots'), ctx.obj(keep));
   const form = lib.catalog.lookup(N('AcroForm'));
   const fields = form instanceof PL.PDFDict ? form.lookup(N('Fields')) : null;
@@ -1197,9 +1234,12 @@ async function writePdfa(lib) {
   const ctx = lib.context;
   const cat = lib.catalog;
   const now = new Date(Math.floor(Date.now() / 1000) * 1000);
+  // Real files often have Info dates or strings pdf-lib can't parse; skip those.
+  const safe = (get) => { try { return get(); } catch { return undefined; } };
+  const created = safe(() => lib.getCreationDate());
   const meta = {
-    title: lib.getTitle(), author: lib.getAuthor(), subject: lib.getSubject(), keywords: lib.getKeywords(),
-    creator: lib.getCreator() || 'PDF Tools', producer: 'PDF Tools', created: lib.getCreationDate() || now, modified: now,
+    title: safe(() => lib.getTitle()), author: safe(() => lib.getAuthor()), subject: safe(() => lib.getSubject()), keywords: safe(() => lib.getKeywords()),
+    creator: safe(() => lib.getCreator()) || 'PDF Tools', producer: 'PDF Tools', created: created && !isNaN(created) ? created : now, modified: now,
   };
   // The Info dictionary and the XMP must say the same thing.
   if (meta.title) lib.setTitle(meta.title);

@@ -120,7 +120,7 @@ export const tick = () => new Promise((r) => setTimeout(r, 0));
 /* ---------- files ---------- */
 
 export const isPdf = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
-export const isImage = (f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|bmp)$/i.test(f.name);
+export const isImage = (f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i.test(f.name); // HEIC gets through to a clear "save as JPG" message
 
 export function fmtSize(n) {
   if (n < 1024) return n + ' B';
@@ -133,6 +133,7 @@ export function pickFiles({ accept = 'application/pdf,.pdf', multiple = false } 
   return new Promise((resolve) => {
     const input = h('input', { type: 'file', accept, multiple, style: { display: 'none' } });
     input.addEventListener('change', () => { resolve([...input.files]); input.remove(); });
+    input.addEventListener('cancel', () => { resolve([]); input.remove(); }); // closed without picking
     document.body.append(input);
     input.click();
   });
@@ -172,16 +173,39 @@ export async function openPdf(file) {
 // pdf-lib copy of a loaded PDF. Files with only an owner password open with
 // an empty one; pdf-lib still has to be told to decrypt them.
 export async function loadLib(doc) {
-  const opts = { updateMetadata: false };
   let lib;
   try {
-    lib = await PDFDocument.load(doc.bytes, { ...opts, password: doc.password });
+    lib = await loadBytes(doc.bytes, doc.password);
   } catch (err) {
-    if (!(err instanceof window.PDFLib.EncryptedPDFError || /encrypted/i.test(err?.message))) throw err;
-    lib = await PDFDocument.load(doc.bytes, { ...opts, password: doc.password ?? '' });
+    // pdf.js is more forgiving than pdf-lib. A missing or late "%PDF-" header
+    // is the usual reason; pdf-lib reads objects in order, so fix just that.
+    const fixed = withHeader(doc.bytes);
+    try { if (!fixed) throw err; lib = await loadBytes(fixed, doc.password); } catch (err2) {
+      console.warn('pdf-lib could not read this file', err2);
+      throw new Error(`“${doc.name}” is damaged in a way this tool can’t change. Run it through Repair PDF first, then open the repaired copy.`);
+    }
   }
   if (lib.context.isDecrypted) scrubEncryption(lib);
   return lib;
+}
+async function loadBytes(bytes, password) {
+  const opts = { updateMetadata: false };
+  try {
+    return await PDFDocument.load(bytes, { ...opts, password });
+  } catch (err) {
+    if (!(err instanceof window.PDFLib.EncryptedPDFError || /encrypted/i.test(err?.message))) throw err;
+    return PDFDocument.load(bytes, { ...opts, password: password ?? '' });
+  }
+}
+// The bytes from the "%PDF-" header on, or with one added; null if neither helps.
+function withHeader(bytes) {
+  const at = new TextDecoder('latin1').decode(bytes.subarray(0, 1024)).indexOf('%PDF-');
+  if (at > 0) return bytes.subarray(at);
+  if (at === 0) return null;
+  const out = new Uint8Array(bytes.length + 9);
+  out.set(new TextEncoder().encode('%PDF-1.7\n'));
+  out.set(bytes, 9);
+  return out;
 }
 
 // After decrypting, the old encryption dictionary, the original xref stream
@@ -219,15 +243,18 @@ export function askPassword(name, wrong) {
   });
 }
 
-// Small promise-based dialog. body(m) returns nodes and may set m.value().
+// Small promise-based dialog. body(m) returns nodes and may set m.value()
+// (sync or async); returning STAY keeps the dialog open.
+// Dispatching 'modal-close' on .modal cancels it (app.js does on navigation).
+export const STAY = Symbol('stay');
 export function modal({ title, body, okText = 'OK', cancelText = 'Cancel', wide = false }) {
   return new Promise((resolve) => {
     const m = { value: () => true };
     const close = (v) => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
-    m.ok = () => close(m.value());
+    m.ok = async () => { const v = await m.value(); if (v !== STAY && wrap.isConnected) close(v); };
     m.cancel = () => close(null);
     const onKey = (e) => e.key === 'Escape' && m.cancel();
-    const wrap = h('div', { class: 'modal', onclick: (e) => e.target === wrap && m.cancel() },
+    const wrap = h('div', { class: 'modal', onclick: (e) => e.target === wrap && m.cancel(), 'onmodal-close': () => m.cancel() },
       h('div', { class: 'modal__box' + (wide ? ' modal__box--wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
         h('h2', {}, title),
         h('div', { class: 'modal__body' }, body(m)),
@@ -286,7 +313,11 @@ export async function pageSizes(js) {
 // /Rotate) to PDF user space, and gives the rotation that keeps drawn
 // things upright. Every tool that stamps onto pages goes through this.
 export function pageFrame(page) {
-  const { x: cx, y: cy, width: cw, height: ch } = page.getCropBox();
+  // Viewers show the CropBox clipped to the MediaBox; so must we.
+  const crop = page.getCropBox(), media = page.getMediaBox();
+  const cx = Math.max(crop.x, media.x), cy = Math.max(crop.y, media.y);
+  const cw = Math.max(1, Math.min(crop.x + crop.width, media.x + media.width) - cx);
+  const ch = Math.max(1, Math.min(crop.y + crop.height, media.y + media.height) - cy);
   const R = ((page.getRotation().angle % 360) + 360) % 360;
   const side = R === 90 || R === 270;
   const W = side ? ch : cw;
@@ -317,11 +348,12 @@ export function boxAnchor(frame, cx, cy, w, hgt, theta = 0) {
 // "1-3, 5, 8-" -> [0,1,2,4,7,8,...] (0-based, in the order written).
 export function parseRanges(text, count) {
   const out = [];
-  const parts = String(text).split(/[,;\s]+/).filter(Boolean);
+  // "1 - 3" is one range, not "1", "-" (= every page) and "3".
+  const parts = String(text).replace(/\s*[-–—]\s*/g, '-').split(/[,;\s]+/).filter(Boolean);
   if (!parts.length) throw new Error('Type the pages, for example 1-3, 5');
   for (const part of parts) {
-    const m = part.match(/^(\d*)\s*[-–]\s*(\d*)$|^(\d+)$/);
-    if (!m) throw new Error(`“${part}” is not a page or a range.`);
+    const m = part.match(/^(\d*)-(\d*)$|^(\d+)$/);
+    if (!m || part === '-') throw new Error(`“${part}” is not a page or a range.`);
     let a, b;
     if (m[3]) a = b = +m[3];
     else { a = m[1] ? +m[1] : 1; b = m[2] ? +m[2] : count; }
@@ -378,12 +410,35 @@ export function hexToRgb(hex) {
 
 // Decodes any browser-readable image (EXIF rotation applied) and returns
 // bytes pdf-lib can embed: PNG when it has transparency, JPEG otherwise.
+// Big photos are scaled while decoding (resizeWidth/Height), so a 50 MP
+// picture never sits in memory at full size.
 export async function imageForPdf(file, { maxSide = 0, quality = 0.92, keepAlpha = true } = {}) {
-  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
-  let { width, height } = bmp;
-  if (maxSide && Math.max(width, height) > maxSide) {
+  const unreadable = () => new Error(/\.(heic|heif)$/i.test(file.name) || /hei[cf]/i.test(file.type)
+    ? `“${file.name}” is a HEIC photo, which this browser can’t open. Save it as JPG first (on iPhone: Settings › Camera › Formats › Most Compatible).`
+    : `“${file.name}” can’t be read as an image.`);
+  // Size as shown (EXIF orientation applied), without decoding every pixel.
+  const size = await new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve({ w: img.naturalWidth, h: img.naturalHeight }); };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+  let width = size?.w || 0, height = size?.h || 0;
+  const opts = { imageOrientation: 'from-image' };
+  if (width && maxSide && Math.max(width, height) > maxSide) {
     const k = maxSide / Math.max(width, height);
-    width = Math.round(width * k); height = Math.round(height * k);
+    width = Math.max(1, Math.round(width * k)); height = Math.max(1, Math.round(height * k));
+    Object.assign(opts, { resizeWidth: width, resizeHeight: height, resizeQuality: 'high' });
+  }
+  let bmp;
+  try { bmp = await createImageBitmap(file, opts); } catch { throw unreadable(); }
+  if (!width) {
+    ({ width, height } = bmp);
+    if (maxSide && Math.max(width, height) > maxSide) {
+      const k = maxSide / Math.max(width, height);
+      width = Math.max(1, Math.round(width * k)); height = Math.max(1, Math.round(height * k));
+    }
   }
   const c = document.createElement('canvas');
   c.width = width; c.height = height;
@@ -393,6 +448,8 @@ export async function imageForPdf(file, { maxSide = 0, quality = 0.92, keepAlpha
   const png = keepAlpha && /png|gif|webp/i.test(file.type) && hasAlpha(ctx, width, height);
   if (!png) { ctx.globalCompositeOperation = 'destination-over'; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height); }
   const blob = await new Promise((r) => c.toBlob(r, png ? 'image/png' : 'image/jpeg', quality));
+  c.width = c.height = 0;
+  if (!blob) throw new Error(`“${file.name}” is too large for this device to convert.`);
   return { bytes: new Uint8Array(await blob.arrayBuffer()), png, width, height };
 }
 

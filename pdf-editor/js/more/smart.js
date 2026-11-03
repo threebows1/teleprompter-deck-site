@@ -194,12 +194,14 @@ const summarize = {
   async run(ctx) {
     const doc = ctx.items[0];
     const s = ctx.state;
-    // Chrome only starts a model download right after a click, so ask first.
+    // Read the text first, so a scan never starts a model download. Kept for
+    // the next press: if reading took long enough that Chrome no longer
+    // counts it as right after a click, the second press starts at once.
+    const paras = s.paras ||= await docParagraphs(doc, (i) => busy(`Reading page ${i + 1} of ${doc.pages}…`));
+    if (!paras.some((p) => /\p{L}{2}/u.test(p.text))) throw new Error('This PDF has no text to summarize. If it is a scan, run OCR on it first.');
     const sm = s.method === 'ai' ? await newSummarizer({ type: s.type, length: s.length }, doc.name) : null;
     let md;
     try {
-      const paras = await docParagraphs(doc, (i) => busy(`Reading page ${i + 1} of ${doc.pages}…`));
-      if (!paras.some((p) => /\p{L}{2}/u.test(p.text))) throw new Error('This PDF has no text to summarize. If it is a scan, run OCR on it first.');
       if (sm) md = await aiSummary(paras, sm, doc.name);
       else { busy('Picking the key sentences…'); await tick(); md = extractive(paras, s.type, s.length); }
     } finally { sm?.destroy?.(); }
@@ -282,7 +284,8 @@ async function pack(pieces, fits) {
     if (cur) { chunks.push(cur); cur = ''; queue.unshift(p); continue; }
     const sents = sentences(p);
     if (sents.length > 1) { const mid = Math.ceil(sents.length / 2); queue.unshift(sents.slice(0, mid).join(' '), sents.slice(mid).join(' ')); }
-    else { const mid = Math.ceil(p.length / 2); queue.unshift(p.slice(0, mid), p.slice(mid)); }
+    else if (p.length > 1) { const mid = Math.ceil(p.length / 2); queue.unshift(p.slice(0, mid), p.slice(mid)); }
+    else if (p.trim()) throw new Error('This PDF is too long for Chrome’s AI. Try Quick extract.'); // not even one letter fits
   }
   if (cur) chunks.push(cur);
   return chunks;
@@ -535,10 +538,15 @@ const translate = {
     const s = ctx.state;
     let from = s.source === 'auto' ? s.detected : s.source;
     if (!from) {
-      if ((await aiState('LanguageDetector')) === 'missing') throw new Error('Pick the language the PDF is in, under “From”.');
+      const pickIt = 'Pick the language the PDF is in, under “From”.';
+      if (['missing', 'unavailable'].includes(await aiState('LanguageDetector'))) throw new Error(pickIt);
       busy('Detecting the language…');
       s.sample ??= (await docParagraphs(doc)).map((p) => p.text).join(' ').slice(0, 3000);
-      from = await detectLang(s.sample);
+      try { from = await detectLang(s.sample); } catch (err) {
+        if (err?.name === 'NotAllowedError') throw new Error('Chrome needs a click to download its language detector. Press Translate PDF again.');
+        console.warn('language detector', err);
+        throw new Error(pickIt);
+      }
       if (!from) throw new Error('Could not tell which language this PDF is in. Pick it under “From”.');
     }
     if (from === s.target) throw new Error(`This PDF is already in ${langName(from)}. Pick another language.`);
@@ -735,8 +743,16 @@ const forms = {
         f = { name: a.fieldName, kind, widgets: [], value, options: a.options || [], multi: !!a.multiSelect, maxLen: a.maxLen || null, readOnly: !!a.readOnly };
         existing.set(a.fieldName, f);
       }
-      f.widgets.push({ page: i, box, on: a.buttonValue || a.exportValue });
+      f.widgets.push({ page: i, box, on: a.buttonValue || a.exportValue, fv: a.fieldValue });
     }));
+    // Checkboxes that share a name but not an "on" value act like a choice:
+    // ticking one gives the field that box's value and unticks the others.
+    existing.forEach((f) => {
+      if (f.kind !== 'check' || new Set(f.widgets.map((w) => w.on)).size < 2) return;
+      const fv = f.widgets[0].fv;
+      f.group = true;
+      f.value = fv && fv !== 'Off' ? String(fv) : '';
+    });
     const st = ctx.state = { doc, pages, existing: [...existing.values()], changed: new Map(), fields: [], sel: null, tool: null, flatten: false, mode: existing.size ? 'fill' : 'add' };
 
     const pageEls = pages.map((p, i) => {
@@ -758,7 +774,7 @@ const forms = {
       st.changed.set(f.name, v);
       // A field can show up more than once (on every page, say): keep them in step.
       if (f.kind === 'text' || f.kind === 'multi') twins(f).forEach((x) => x !== from && (x.value = v));
-      if (f.kind === 'check') twins(f).forEach((x) => (x.checked = v));
+      if (f.kind === 'check') twins(f).forEach((x) => (x.checked = f.group ? !!v && x.dataset.on === v : v));
     };
     const inputFor = (f, w, k) => {
       const common = { class: 'sm-in sm-in--' + f.kind, 'data-field': f.name, disabled: f.readOnly, title: f.name, 'aria-label': f.name, style: { fontSize: fontFor(w.page, w.box) } };
@@ -767,6 +783,7 @@ const forms = {
         el.value = val(f);
         return el;
       }
+      if (f.kind === 'check' && f.group) return h('input', { ...common, type: 'checkbox', 'data-on': w.on, checked: !!val(f) && val(f) === w.on, onchange: (e) => set(f, e.target.checked ? w.on : '') });
       if (f.kind === 'check') return h('input', { ...common, type: 'checkbox', checked: !!val(f), onchange: (e) => set(f, e.target.checked) });
       if (f.kind === 'radio') return h('input', { ...common, type: 'radio', name: 'sm-r-' + k, value: w.on, checked: val(f) === w.on, onchange: () => set(f, w.on) });
       if (f.kind === 'select' || f.kind === 'list') {
@@ -950,25 +967,50 @@ const forms = {
     const st = ctx.state;
     if (!st.changed.size && !st.fields.length && !st.flatten) throw new Error(st.existing.length ? 'Fill in a field, or add one, first.' : 'Add a field first.');
     const lib = await loadLib(st.doc);
-    const { PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList, PDFName, PDFBool } = window.PDFLib;
+    const { PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList, PDFName, PDFBool, PDFHexString } = window.PDFLib;
     const form = lib.getForm();
+    const helv = await lib.embedFont(StandardFonts.Helvetica);
     const problems = [];
+    const foreign = []; // text answers the built-in font can't draw: [field, text]
+    const byName = new Map(st.existing.map((f) => [f.name, f]));
     for (const [name, v] of st.changed) {
       const f = form.getFieldMaybe(name);
       try {
-        if (f instanceof PDFTextField) f.setText(v || undefined);
-        else if (f instanceof PDFCheckBox) v ? f.check() : f.uncheck();
+        if (f instanceof PDFTextField) {
+          f.setText(v || undefined);
+          if (v && !fontCanDraw(helv, v)) foreign.push([f, v]);
+        } else if (f instanceof PDFCheckBox && byName.get(name)?.group) {
+          // Boxes with their own "on" values: the field takes the ticked box's value.
+          const on = v ? PDFName.of(v) : PDFName.of('Off');
+          f.acroField.dict.set(PDFName.of('V'), on);
+          f.acroField.getWidgets().forEach((w) => w.setAppearanceState(v && w.getOnValue() === on ? on : PDFName.of('Off')));
+        } else if (f instanceof PDFCheckBox) v ? f.check() : f.uncheck();
         else if (f instanceof PDFRadioGroup) {
           // pdf.js gives the button's own "on" name; with /Opt (as pdf-lib
           // writes) that is an index, and the option's name is in /Opt.
           const opts = f.getOptions();
           const k = f.acroField.getOnValues().findIndex((o) => o.decodeText() === v);
           if (!v) f.clear(); else f.select(opts.includes(v) || k < 0 ? v : opts[k]);
-        } else if (f instanceof PDFDropdown) v ? f.select(v) : f.clear();
-        else if (f instanceof PDFOptionList) v.length ? f.select(v) : f.clear();
+        } else if (f instanceof PDFDropdown || f instanceof PDFOptionList) {
+          const values = (Array.isArray(v) ? v : [v]).filter((x) => x !== '' && x != null);
+          if (!values.length) { f.clear(); continue; }
+          // The page shows each option's display text; the field's value is its
+          // export value. pdf-lib only knows display texts (anything else would
+          // turn the field into a typed-in one), so pick by display, draw, then
+          // store the export values.
+          const raw = f.acroField.getOptions();
+          const shown = values.map((x) => { const o = raw.find((r) => r.value.decodeText() === x); return o ? (o.display ?? o.value).decodeText() : x; });
+          f.select(f instanceof PDFDropdown ? shown[0] : shown);
+          if (shown.every((x) => fontCanDraw(helv, x))) f.updateAppearances(helv);
+          else foreign.push([f, shown.join(', ')]);
+          // (pdf-lib's own setValues checks against display texts, so set /V and /I here.)
+          const vals = values.map((x) => PDFHexString.fromText(x));
+          const at = values.map((x) => raw.findIndex((r) => r.value.decodeText() === x)).filter((k) => k >= 0).sort((a, b) => a - b);
+          f.acroField.dict.set(PDFName.of('V'), vals.length === 1 ? vals[0] : lib.context.obj(vals));
+          if (at.length > 1) f.acroField.dict.set(PDFName.of('I'), lib.context.obj(at)); else f.acroField.dict.delete(PDFName.of('I'));
+        }
       } catch (err) { console.warn(name, err); problems.push(name); }
     }
-    const helv = await lib.embedFont(StandardFonts.Helvetica);
     const radios = new Map();
     for (const f of st.fields) {
       const page = lib.getPage(f.page);
@@ -1009,8 +1051,27 @@ const forms = {
     busy('Saving…');
     let bytes;
     try {
+      const pictures = [];
+      if (foreign.length && st.flatten) {
+        // The built-in font would print "?" for these. The field is flattened
+        // empty (its box stays), then the browser draws the answer on top.
+        for (const [f, text] of foreign) {
+          for (const w of f.acroField.getWidgets()) {
+            const page = form.findWidgetPage(w);
+            if (page) pictures.push({ page, rect: w.getRectangle(), text, multi: f instanceof PDFTextField && f.isMultiline() });
+          }
+          f instanceof PDFTextField ? f.setText(undefined) : f.clear();
+        }
+      } else if (foreign.length) {
+        // Not flattened: leave the drawing to the PDF reader, which has the
+        // fonts. Drop the "?" appearances pdf-lib would make for these.
+        form.updateFieldAppearances(helv);
+        for (const [f] of foreign) f.acroField.getWidgets().forEach((w) => w.dict.delete(PDFName.of('AP')));
+        form.acroForm.dict.set(PDFName.of('NeedAppearances'), PDFBool.True);
+      }
       if (st.flatten) form.flatten();
-      bytes = await lib.save();
+      for (const x of pictures) await drawAnswer(lib, x.page, x.rect, x.text, x.multi);
+      bytes = await lib.save(foreign.length && !st.flatten ? { updateFieldAppearances: false } : {});
     } catch (err) {
       // pdf-lib draws answers with a Latin-only font. Without flattening, PDF
       // readers can draw them instead (NeedAppearances).
@@ -1031,6 +1092,28 @@ const forms = {
     };
   },
 };
+
+// Draws a form answer as a picture inside a widget's rectangle (PDF space),
+// upright as the page is shown, right-aligned for right-to-left text.
+async function drawAnswer(lib, page, rect, text, multiline) {
+  const fr = pageFrame(page);
+  // view -> PDF is affine (fr.map); turn it around to place the box in view space.
+  const o = fr.map(0, 0), ex = fr.map(1, 0), ey = fr.map(0, 1);
+  const a = ex.x - o.x, b = ex.y - o.y, c = ey.x - o.x, d = ey.y - o.y, det = a * d - b * c;
+  const toView = (x, y) => ({ x: ((x - o.x) * d - (y - o.y) * c) / det, y: (-(x - o.x) * b + (y - o.y) * a) / det });
+  const p = toView(rect.x, rect.y), q = toView(rect.x + rect.width, rect.y + rect.height);
+  const box = { x: Math.min(p.x, q.x), y: Math.min(p.y, q.y), w: Math.abs(q.x - p.x), h: Math.abs(q.y - p.y) };
+  const pad = 2;
+  const size = multiline ? 10 : Math.max(6, Math.min(14, box.h * 0.6));
+  const rtl = firstStrongRtl(text);
+  const png = await textAsPng(multiline ? text : isolate(text.replace(/\s*\n\s*/g, ' ')), { size, color: '#121233', lineHeight: 1.2, align: rtl ? 'right' : 'left' });
+  const k = Math.min(1, (box.w - 2 * pad) / png.width, (box.h - (multiline ? 2 * pad : 0)) / png.height);
+  const w = png.width * k, hh = png.height * k;
+  const x = rtl ? box.x + box.w - pad - w : box.x + pad;
+  const y = multiline ? box.y + pad : box.y + (box.h - hh) / 2;
+  const at = boxAnchor(fr, x + w / 2, y + hh / 2, w, hh);
+  page.drawImage(await lib.embedPng(png.bytes), { x: at.x, y: at.y, width: w, height: hh, rotate: at.rotate });
+}
 
 const cleanName = (s) => String(s || '').replace(/[_:.*]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
 
@@ -1073,26 +1156,8 @@ async function detectFields(pages, taken) {
     const sameLine = (a, b) => Math.abs(a.base - b.base) < a.size * 0.5;
     const before = (t, x) => items.filter((o) => o !== t && sameLine(o, t) && o.x + o.w <= x + 1).sort((a, b) => b.x - a.x)[0];
     const after = (t, x) => items.filter((o) => o !== t && sameLine(o, t) && o.x >= x - 1).sort((a, b) => a.x - b.x)[0];
-    for (const t of items) {
-      for (const m of t.str.matchAll(/_{3,}/g)) {
-        const x0 = xAt(t, m.index), x1 = xAt(t, m.index + m[0].length);
-        const label = t.str.slice(0, m.index).split(/_{3,}/).pop().trim() || before(t, t.x)?.str.split(/_{3,}/).pop() || '';
-        add('text', i, { x: x0, y: t.base - t.size * 1.05, w: x1 - x0, h: t.size * 1.25 }, label);
-      }
-      for (const m of t.str.matchAll(BOXES)) {
-        const x0 = xAt(t, m.index), x1 = xAt(t, m.index + m[0].length);
-        const side = Math.min(t.size * 0.9, Math.max(x1 - x0, t.size * 0.6));
-        const label = t.str.slice(m.index + m[0].length).split(BOXES)[0].trim() || after(t, x1)?.str || 'Checkbox';
-        add('check', i, { x: x0 + (x1 - x0 - side) / 2, y: t.base - t.size * 0.8, w: side, h: side }, label);
-      }
-      if (/:\s*$/.test(t.str)) {
-        const end = t.x + t.w;
-        const next = after(t, end);
-        const room = (next ? next.x : P.w - 36) - end;
-        if (room >= 60) add('text', i, { x: end + 6, y: t.base - t.size * 1.05, w: Math.min(room - 12, 260), h: t.size * 1.25 }, t.str);
-      }
-    }
-    // Rectangles drawn on the page with no text inside.
+    // Rectangles drawn on the page with no text inside. First, so a box that
+    // is really there wins over a field guessed from a label next to it.
     const ops = await P.pg.getOperatorList();
     let ctm = [1, 0, 0, 1, 0, 0];
     const stack = [];
@@ -1111,6 +1176,28 @@ async function detectFields(pages, taken) {
         const line = { base: box.y + box.h - 2, size: Math.max(box.h, 10) };
         if (box.w >= 7 && box.w <= 22 && Math.abs(box.w - box.h) < 2) add('check', i, box, after(line, box.x + box.w)?.str || 'Checkbox');
         else if (box.w >= 50 && box.w <= P.w * 0.8 && box.h >= 12 && box.h <= 60) add('text', i, box, before(line, box.x)?.str || '');
+      }
+    }
+    // Then what the text suggests.
+    for (const t of items) {
+      for (const m of t.str.matchAll(/_{3,}/g)) {
+        const x0 = xAt(t, m.index), x1 = xAt(t, m.index + m[0].length);
+        const label = t.str.slice(0, m.index).split(/_{3,}/).pop().trim() || before(t, t.x)?.str.split(/_{3,}/).pop() || '';
+        add('text', i, { x: x0, y: t.base - t.size * 1.05, w: x1 - x0, h: t.size * 1.25 }, label);
+      }
+      for (const m of t.str.matchAll(BOXES)) {
+        const x0 = xAt(t, m.index), x1 = xAt(t, m.index + m[0].length);
+        const side = Math.min(t.size * 0.9, Math.max(x1 - x0, t.size * 0.6));
+        const label = t.str.slice(m.index + m[0].length).split(BOXES)[0].trim() || after(t, x1)?.str || 'Checkbox';
+        add('check', i, { x: x0 + (x1 - x0 - side) / 2, y: t.base - t.size * 0.8, w: side, h: side }, label);
+      }
+      if (/:\s*$/.test(t.str)) {
+        const end = t.x + t.w;
+        const next = after(t, end);
+        // Stop at the next text, or at a box found on this line.
+        const drawn = found.filter((d) => d.page === i && d.box.x >= end - 1 && d.box.y < t.base && d.box.y + d.box.h > t.base - t.size);
+        const room = Math.min(next ? next.x : P.w - 36, ...drawn.map((d) => d.box.x)) - end;
+        if (room >= 60) add('text', i, { x: end + 6, y: t.base - t.size * 1.05, w: Math.min(room - 12, 260), h: t.size * 1.25 }, t.str);
       }
     }
   }
@@ -1135,7 +1222,17 @@ function pathRect(sub, coords, OPS) {
 /* ---------- WORKFLOWS ---------- */
 
 const KEY = 'pdftools.workflows';
-const loadFlows = () => { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } };
+// Whatever is stored (an old format, a hand edit, another app's data) only
+// named workflows with known steps come back; anything else is skipped.
+const loadFlows = () => {
+  let list;
+  try { list = JSON.parse(localStorage.getItem(KEY)); } catch { return []; }
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((f) => f && typeof f === 'object' && typeof f.name === 'string' && f.name.trim() && Array.isArray(f.steps))
+    .map((f) => ({ name: f.name, steps: f.steps.filter((x) => x && typeof x === 'object' && Object.hasOwn(STEPS, x.type)).map(({ password, ...x }) => x) }))
+    .filter((f) => f.steps.length);
+};
 const saveFlows = (list) => { try { localStorage.setItem(KEY, JSON.stringify(list)); return true; } catch { return false; } };
 
 const PRESETS = [

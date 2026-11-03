@@ -10,11 +10,18 @@ const toolById = (id) => TOOLS.find((t) => t.id === id);
 // Files handed to a tool from the workspace ("Open in…").
 let pending = null;
 
+// Bumped on every navigation. Work that finishes after the user has moved on
+// (opening a file, a password prompt, a tool run) checks it and stops.
+let routeGen = 0;
+
 function route() {
   const [id, sub] = location.hash.slice(1).split('/');
   const tool = toolById(id);
+  routeGen++;
   dropHandler = null;
   document.body.classList.remove('has-bar');
+  // Dialogs belong to the page that opened them.
+  document.querySelectorAll('.modal').forEach((m) => m.dispatchEvent(new Event('modal-close')));
   document.querySelectorAll('[data-nav]').forEach((a) => a.toggleAttribute('aria-current', a.dataset.nav === (tool ? 'tools' : id || 'home')));
   if (tool) { window.scrollTo(0, 0); showTool(tool); return; }
   if (id === 'workspace') { window.scrollTo(0, 0); showWorkspace(sub || 'overview'); return; }
@@ -167,20 +174,26 @@ async function showWorkspace(view) {
 }
 
 function docRow(d, onDelete) {
-  const isImg = !/pdf/i.test(d.type);
+  // By type or name: Word, Excel… results are neither PDFs nor images, and a
+  // PDF can arrive with no type at all.
+  const like = { type: d.type || '', name: d.name || '' };
+  const kind = isPdf(like) ? 'pdf' : isImage(like) ? 'image' : 'other';
+  const badge = kind === 'pdf' ? 'PDF' : kind === 'image' ? 'IMG' : ((d.name.match(/\.([a-z0-9]{1,4})$/i)?.[1]) || 'FILE').toUpperCase();
   const open = async (toolId) => {
     const rec = await getDoc(d.id);
     if (!rec) return toast('That file is no longer here.', 'bad');
     pending = { tool: toolId, files: [new File([rec.blob], rec.name, { type: rec.type })] };
     location.hash = toolId;
   };
-  const choices = TOOLS.filter((t) => kindOf(t) === (isImg ? 'image' : 'pdf'));
+  const choices = kind === 'other' ? [] : TOOLS.filter((t) => kindOf(t) === kind);
   return h('li', { class: 'doc' },
-    h('span', { class: 'doc__icon' + (isImg ? ' doc__icon--img' : '') }, isImg ? 'IMG' : 'PDF'),
+    h('span', { class: 'doc__icon' + (kind === 'pdf' ? '' : ` doc__icon--${kind === 'image' ? 'img' : 'other'}`) }, badge),
     h('div', { class: 'doc__meta' }, h('strong', { title: d.name }, d.name),
       h('span', {}, `${when(d.added)} · ${fmtSize(d.size)}${d.tool && d.tool !== 'upload' ? ' · ' + (toolById(d.tool)?.title || '') : ''}`)),
-    h('select', { class: 'field doc__open', 'aria-label': `Open ${d.name} in a tool`, onchange: (e) => e.target.value && open(e.target.value) },
-      h('option', { value: '' }, 'Open in…'), choices.map((t) => h('option', { value: t.id }, t.title))),
+    choices.length
+      ? h('select', { class: 'field doc__open', 'aria-label': `Open ${d.name} in a tool`, onchange: (e) => { const v = e.target.value; e.target.value = ''; if (v) open(v); } },
+        h('option', { value: '' }, 'Open in…'), choices.map((t) => h('option', { value: t.id }, t.title)))
+      : h('span', { class: 'doc__open muted small' }, 'Download to open it'),
     h('button', { class: 'iconbtn', title: 'Download', 'aria-label': `Download ${d.name}`, onclick: async () => { const r = await getDoc(d.id); if (r) download(r.blob, r.name, r.type); } }, icon('download')),
     h('button', { class: 'iconbtn', title: 'Delete', 'aria-label': `Delete ${d.name}`, onclick: onDelete }, icon('trash')));
 }
@@ -239,12 +252,14 @@ const labelOf = (tool) => ({ image: 'images', pdf: 'PDF files', other: tool.acce
 
 function showDrop(tool, body) {
   const pick = async () => onFiles(await pickFiles({ accept: acceptOf(tool), multiple: !!tool.multiple }));
+  const gen = routeGen;
   const onFiles = async (files) => {
     files = files.filter((f) => accepts(tool, f));
     if (!files.length) return toast(`Choose ${kindOf(tool) === 'image' ? 'image files (JPG, PNG, WebP)' : labelOf(tool)}.`, 'bad');
     if (!tool.multiple) files = files.slice(0, 1);
     const items = await openAll(tool, files);
-    if (items.length) startWork(tool, body, items);
+    // The user may have left (or picked another file) while it opened.
+    if (items.length && gen === routeGen && zone.isConnected) startWork(tool, body, items);
   };
   const kind = kindOf(tool);
   const img = kind === 'image';
@@ -256,7 +271,7 @@ function showDrop(tool, body) {
     h('button', { class: 'btn btn--solid btn--big', onclick: pick }, icon('plus'), what ? `Select ${what}` : img ? 'Select images' : (tool.multiple ? 'Select PDF files' : 'Select PDF file')),
     // Extra ways in (camera, a web address…): tool.dropExtra(start) returns nodes;
     // start(items) skips straight to the workspace with items the tool made.
-    tool.dropExtra && h('div', { class: 'drop__extra' }, tool.dropExtra((items) => startWork(tool, body, items))),
+    tool.dropExtra && h('div', { class: 'drop__extra' }, tool.dropExtra((items) => { if (gen === routeGen && zone.isConnected) startWork(tool, body, items); })),
     h('p', { class: 'drop__note' }, icon('shield'), 'Opened on this device, never uploaded'));
   dropHandler = onFiles;
   document.body.classList.remove('has-bar');
@@ -285,15 +300,22 @@ async function openAll(tool, files) {
   return out;
 }
 
-// Whole-window drop while a tool is open.
+// Whole-window drop while a tool is open. A file dropped anywhere else must
+// not make the browser open it in place of the app (losing unsaved edits).
 let dropHandler = null;
-window.addEventListener('dragover', (e) => { if (dropHandler) { e.preventDefault(); document.body.classList.add('dragging'); } });
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+window.addEventListener('dragover', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  if (dropHandler) document.body.classList.add('dragging');
+});
 window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
 window.addEventListener('drop', (e) => {
   document.body.classList.remove('dragging');
-  if (!dropHandler) return;
+  if (!hasFiles(e)) return;
   e.preventDefault();
-  dropHandler([...e.dataTransfer.files]);
+  if (dropHandler) dropHandler([...e.dataTransfer.files]);
+  else toast(document.querySelector('.work') ? 'To work on another file, use “Change file”.' : 'Open a tool first, then drop your file on it.');
 });
 
 function startWork(tool, body, items) {
@@ -307,6 +329,8 @@ function startWork(tool, body, items) {
       h('button', { class: 'linkbtn', onclick: () => showDrop(tool, body) }, tool.multiple ? 'Start over' : 'Change file')),
     side,
     h('div', { class: 'work__go' }, action));
+  const gen = routeGen;
+  const live = () => gen === routeGen && main.isConnected;
   body.replaceChildren(h('div', { class: 'work' + (tool.wide ? ' work--wide' : '') + (tool.editor ? ' work--editor' : '') }, main, sideWrap));
   document.body.classList.add('has-bar');
 
@@ -317,11 +341,11 @@ function startWork(tool, body, items) {
       return openAll(tool, files);
     },
     restart: () => showDrop(tool, body),
-    done: (result) => showDone(tool, body, result),
+    done: (result) => { if (live()) showDone(tool, body, result); },
   };
   dropHandler = tool.multiple ? async (files) => {
     const more = await openAll(tool, files.filter((f) => accepts(tool, f)));
-    if (more.length) ctx.onDropMore?.(more);
+    if (more.length && live()) ctx.onDropMore?.(more);
   } : null;
 
   action.addEventListener('click', async () => {
@@ -330,6 +354,8 @@ function startWork(tool, body, items) {
       await tick();
       const result = await tool.run(ctx);
       busy(false);
+      // Left while it ran: still hand over the file, but leave the new page alone.
+      if (result && !live()) { const f = result.files?.[0]; if (result.files?.length === 1) download(f.bytes, f.name, f.type); return; }
       if (result) showDone(tool, body, result);
     } catch (err) {
       busy(false);
@@ -367,6 +393,15 @@ function showDone(tool, body, result) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
   const next = (NEXT[tool.id] || FALLBACK).filter((id) => id !== tool.id).slice(0, 4).map(toolById).filter(Boolean);
   const files = result.files;
+  // Two inputs with the same name must not overwrite each other in the ZIP.
+  const used = new Set();
+  for (const f of files) {
+    let name = f.name, k = 2;
+    const dot = name.lastIndexOf('.');
+    while (used.has(name.toLowerCase())) name = dot > 0 ? `${f.name.slice(0, dot)}-${k++}${f.name.slice(dot)}` : `${f.name}-${k++}`;
+    used.add(name.toLowerCase());
+    f.name = name;
+  }
   const save = async () => {
     if (files.length === 1) return download(files[0].bytes, files[0].name, files[0].type);
     busy('Making the ZIP…');

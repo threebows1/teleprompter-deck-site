@@ -22,6 +22,8 @@ const tx = async (mode, fn) => {
     const r = fn(t.objectStore(STORE));
     t.oncomplete = () => resolve(r?.result);
     t.onerror = () => reject(t.error);
+    // A full disk (QuotaExceededError) aborts the transaction without an error event.
+    t.onabort = () => reject(t.error || new Error('Storage transaction aborted'));
   });
 };
 
@@ -45,6 +47,8 @@ export async function deleteDoc(id) {
 export async function saveDoc({ name, bytes, type = 'application/pdf', tool = '' }) {
   try {
     const blob = bytes instanceof Blob ? bytes : new Blob([bytes], { type });
+    // A file bigger than the whole store would push every other document out.
+    if (blob.size > LIMIT) return null;
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     await tx('readwrite', (s) => s.put({ id, name, size: blob.size, type: blob.type || type, tool, added: Date.now(), blob }));
     // Stay under LIMIT by dropping the oldest.
@@ -52,6 +56,7 @@ export async function saveDoc({ name, bytes, type = 'application/pdf', tool = ''
     let total = docs.reduce((n, d) => n + d.size, 0);
     for (const d of docs.slice().reverse()) {
       if (total <= LIMIT) break;
+      if (d.id === id) continue; // never the file just saved
       await deleteDoc(d.id);
       total -= d.size;
     }
