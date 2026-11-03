@@ -4,6 +4,7 @@ import {
   parseRanges, pageFrame, boxAnchor, fontCanDraw, textAsPng, hexToRgb, imageForPdf, sortable, uid, pickFiles,
 } from './core.js';
 import { editorTool } from './editor.js';
+import { parseOps, readPage } from './content.js';
 import {
   field, segmented, choiceCards, check, slider, debounce, fileHero, fileRow, GROUP_COLORS, fileCard, pageGrid, pdfOut, previewInto, singlePage, previewPane,
 } from './ui.js';
@@ -240,10 +241,11 @@ const rotate = pagesTool({
 
 /* ---------- COMPRESS ---------- */
 
+// dpi: resolution kept for each image at the size it is drawn on the page.
 export const LEVELS = {
-  low: { maxSide: 2400, quality: 0.82 },
-  medium: { maxSide: 1600, quality: 0.68 },
-  high: { maxSide: 1100, quality: 0.5 },
+  low: { maxSide: 2400, quality: 0.82, dpi: 220 },
+  medium: { maxSide: 1600, quality: 0.68, dpi: 150 },
+  high: { maxSide: 1100, quality: 0.5, dpi: 96 },
 };
 
 const compress = {
@@ -263,13 +265,16 @@ const compress = {
     const doc = ctx.items[0];
     const lib = await loadLib(doc);
     const { done, total } = await shrinkImages(lib, LEVELS[ctx.state.level], (k, n) => busy(`Compressing image ${k} of ${n}…`));
+    busy('Tidying up…');
+    await tick();
+    await tidyPdf(lib);
     busy('Saving…');
     await tick();
     const bytes = await lib.save({ useObjectStreams: true });
     const before = doc.size;
     const smaller = bytes.byteLength < before;
     const final = smaller ? bytes : doc.bytes;
-    const pct = Math.round((1 - final.byteLength / before) * 100);
+    const pct = Math.min(99, Math.round((1 - final.byteLength / before) * 100));
     return {
       files: [pdfOut(`${baseName(doc.name)}-compressed.pdf`, final)],
       title: smaller ? `Your PDF is ${pct}% smaller` : 'This PDF is already compact',
@@ -280,9 +285,10 @@ const compress = {
 
 // Re-encodes photos inside the PDF as smaller JPEGs. Vector text and drawings
 // aren't touched. Images we can't decode safely are left as they are.
-export async function shrinkImages(lib, { maxSide, quality }, progress) {
+export async function shrinkImages(lib, { maxSide, quality, dpi }, progress) {
   const { PDFName, PDFNumber, PDFRawStream, PDFRef, decodePDFRawStream } = window.PDFLib;
   const N = (n) => PDFName.of(n);
+  const placed = dpi ? placedSizes(lib) : new Map();
   const jobs = [];
   // Soft masks and stencil masks are images too, but they must stay 1-channel
   // and lossless; turning them into RGB JPEGs makes the masked image vanish.
@@ -306,9 +312,13 @@ export async function shrinkImages(lib, { maxSide, quality }, progress) {
   for (const [k, job] of jobs.entries()) {
     if (k % 3 === 0) { progress(k + 1, jobs.length); await tick(); }
     try {
-      const img = await decodeImage(job.obj, job.w, job.hgt, window.PDFLib);
+      const img = await decodeImage(job.obj, job.w, job.hgt, window.PDFLib, { cmyk: true });
       if (!img) continue;
-      const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      let scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      // Keep `dpi` at the largest size the image is drawn (area-based, so a
+      // rotated image counts the same).
+      const use = placed.get(job.ref.toString());
+      if (use) scale = Math.min(scale, Math.max(0.05, Math.sqrt((use.w * use.h * dpi * dpi) / (72 * 72) / (img.width * img.height))));
       const c = document.createElement('canvas');
       const cw = c.width = Math.max(1, Math.round(img.width * scale));
       const ch = c.height = Math.max(1, Math.round(img.height * scale));
@@ -321,7 +331,7 @@ export async function shrinkImages(lib, { maxSide, quality }, progress) {
       c.width = c.height = 0;
       if (!blob) throw new Error(`image ${job.ref} is too large to re-encode on this device`);
       const jpg = new Uint8Array(await blob.arrayBuffer());
-      if (jpg.byteLength >= job.obj.contents.byteLength * 0.9) continue;
+      if (jpg.byteLength >= job.obj.contents.byteLength * 0.97) continue;
       const nd = job.obj.dict.clone(lib.context);
       ['DecodeParms', 'DP', 'Filter', 'F', 'ColorSpace', 'BitsPerComponent', 'Length', 'Intent'].forEach((key) => nd.delete(N(key)));
       nd.set(N('Filter'), N('DCTDecode'));
@@ -334,6 +344,104 @@ export async function shrinkImages(lib, { maxSide, quality }, progress) {
     } catch (err) { console.warn('kept image', err); }
   }
   return { done, total: jobs.length };
+}
+
+// How big each image is drawn, in points (the largest use wins), keyed by
+// its reference. Follows the drawing commands, including inside forms.
+function placedSizes(lib) {
+  const { PDFName, PDFDict, PDFRef, PDFRawStream, decodePDFRawStream } = window.PDFLib;
+  const N = (n) => PDFName.of(n);
+  const ctx = lib.context;
+  const out = new Map();
+  const mul = (m, n) => [m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3], m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3], m[4] * n[0] + m[5] * n[2] + n[4], m[4] * n[1] + m[5] * n[3] + n[5]];
+  const walk = (ops, resources, base, depth) => {
+    const xo = resources instanceof PDFDict ? resources.lookup(N('XObject')) : null;
+    if (!(xo instanceof PDFDict) || depth > 8) return;
+    let ctm = base;
+    const stack = [];
+    for (const o of ops) {
+      const a = o.args;
+      if (o.op === 'q') stack.push(ctm);
+      else if (o.op === 'Q') ctm = stack.pop() || base;
+      else if (o.op === 'cm' && a.length >= 6 && a.slice(0, 6).every((v) => typeof v === 'number')) ctm = mul(a.slice(0, 6), ctm);
+      else if (o.op === 'Do' && a[0]?.name) {
+        const ref = xo.get(N(a[0].name));
+        const x = ctx.lookup(ref);
+        const sub = x?.dict?.get(N('Subtype'))?.toString();
+        if (sub === '/Image' && ref instanceof PDFRef) {
+          const k = ref.toString(), prev = out.get(k);
+          out.set(k, { w: Math.max(Math.hypot(ctm[0], ctm[1]), prev?.w || 0), h: Math.max(Math.hypot(ctm[2], ctm[3]), prev?.h || 0) });
+        } else if (sub === '/Form' && x instanceof PDFRawStream) {
+          const m = x.dict.lookup(N('Matrix'))?.asArray?.().map((v) => v.asNumber?.() ?? 0);
+          let bytes;
+          try { bytes = decodePDFRawStream(x).decode(); } catch { continue; }
+          walk(parseOps(bytes), x.dict.lookup(N('Resources')) || resources, mul(m?.length === 6 ? m : [1, 0, 0, 1, 0, 0], ctm), depth + 1);
+        }
+      }
+    }
+  };
+  lib.getPages().forEach((page, i) => {
+    try { walk(readPage(lib, i).ops, page.node.Resources(), [1, 0, 0, 1, 0, 0], 0); } catch (err) { console.warn('image sizes', err); }
+  });
+  return out;
+}
+
+// Savings that don't touch how anything looks: one copy of identical streams
+// (merged files repeat logos and fonts), deflate for uncompressed streams,
+// and no thumbnails, editor private data or objects nothing refers to.
+export async function tidyPdf(lib) {
+  const { PDFName, PDFDict, PDFArray, PDFRef, PDFRawStream } = window.PDFLib;
+  const N = (n) => PDFName.of(n);
+  const ctx = lib.context;
+  for (const p of lib.getPages()) { p.node.delete(N('Thumb')); p.node.delete(N('PieceInfo')); }
+  lib.catalog.delete(N('PieceInfo'));
+
+  // Identical streams -> one.
+  const seen = new Map(), dup = new Map();
+  for (const [ref, obj] of ctx.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFRawStream) || obj.contents.byteLength < 64) continue;
+    const d = obj.dict.clone(ctx);
+    d.delete(N('Length'));
+    const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', obj.contents)).join(',');
+    const key = d.toString() + '|' + hash;
+    if (seen.has(key)) dup.set(ref.toString(), seen.get(key));
+    else seen.set(key, ref);
+  }
+  if (dup.size) {
+    const fix = (o) => {
+      if (o instanceof PDFDict) for (const [k, v] of o.entries()) { if (v instanceof PDFRef && dup.has(v.toString())) o.set(k, dup.get(v.toString())); else fix(v); }
+      else if (o instanceof PDFArray) o.asArray().forEach((v, i) => { if (v instanceof PDFRef && dup.has(v.toString())) o.set(i, dup.get(v.toString())); else fix(v); });
+      else if (o?.dict instanceof PDFDict) fix(o.dict);
+    };
+    for (const [, obj] of ctx.enumerateIndirectObjects()) fix(obj);
+  }
+
+  // Deflate streams stored without any compression.
+  for (const [ref, obj] of ctx.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFRawStream) || obj.dict.has(N('Filter')) || obj.contents.byteLength < 256) continue;
+    const z = ctx.flateStream(obj.contents);
+    if (z.contents.byteLength >= obj.contents.byteLength * 0.9) continue;
+    const d = obj.dict.clone(ctx);
+    d.delete(N('Length'));
+    d.delete(N('DecodeParms'));
+    d.set(N('Filter'), N('FlateDecode'));
+    ctx.assign(ref, PDFRawStream.of(d, z.contents));
+  }
+
+  // Keep only what the document can reach.
+  const keep = new Set();
+  const visit = (o) => {
+    if (o instanceof PDFRef) {
+      const k = o.toString();
+      if (keep.has(k)) return;
+      keep.add(k);
+      visit(ctx.lookup(o));
+    } else if (o instanceof PDFDict) for (const [, v] of o.entries()) visit(v);
+    else if (o instanceof PDFArray) o.asArray().forEach(visit);
+    else if (o?.dict instanceof PDFDict) visit(o.dict);
+  };
+  [ctx.trailerInfo.Root, ctx.trailerInfo.Info, ctx.trailerInfo.Encrypt].forEach((r) => r && visit(r));
+  for (const [ref] of [...ctx.enumerateIndirectObjects()]) if (!keep.has(ref.toString())) ctx.delete(ref);
 }
 
 const RAW_FILTERS = ['/FlateDecode', '/LZWDecode', '/ASCII85Decode', '/ASCIIHexDecode', '/RunLengthDecode'];
@@ -390,7 +498,7 @@ function componentsOf(d, N) {
   const cs = d.lookup(N('ColorSpace'));
   const csName = cs?.asArray ? String(cs.asArray()[0]) : String(cs);
   if (csName === '/ICCBased') return d.context.lookup(cs.asArray()[1])?.dict?.get(N('N'))?.asNumber?.() || 0;
-  return csName === '/DeviceGray' || csName === '/CalGray' ? 1 : csName === '/DeviceRGB' || csName === '/CalRGB' ? 3 : 0;
+  return csName === '/DeviceGray' || csName === '/CalGray' ? 1 : csName === '/DeviceRGB' || csName === '/CalRGB' ? 3 : csName === '/DeviceCMYK' ? 4 : 0;
 }
 
 // A simple soft mask (8-bit gray, same size, no Matte/Decode) as alpha bytes, or null.
@@ -407,12 +515,16 @@ function softMaskAlpha(d, w, hgt, ns) {
 // Decodes an image XObject into an ImageBitmap the size of its /Width × /Height,
 // or null for kinds we don't handle (CMYK, indexed, 16-bit, odd /Decode...).
 // alpha: optional w*hgt alpha bytes (from softMaskAlpha).
-async function decodeImage(stream, w, hgt, ns, { alpha = null } = {}) {
+async function decodeImage(stream, w, hgt, ns, { alpha = null, cmyk = false } = {}) {
   const N = (n) => ns.PDFName.of(n);
   const d = stream.dict;
   const filters = filtersOf(d, N);
   const comps = componentsOf(d, N);
-  if (comps !== 1 && comps !== 3) return null;
+  // CMYK only as a JPEG with Adobe's marker, which browsers decode correctly
+  // (print and scanner PDFs); the result becomes an RGB JPEG.
+  const adobeCmyk = cmyk && comps === 4 && filters.length === 1 && filters[0] === '/DCTDecode' && !alpha
+    && new TextDecoder('latin1').decode(stream.contents.subarray(0, 4096)).includes('Adobe');
+  if (comps !== 1 && comps !== 3 && !adobeCmyk) return null;
   // /Decode: the default is fine, an inverted gray image we flip, others we skip.
   let invert = false;
   const dec = d.lookup(N('Decode'))?.asArray?.().map((x) => x.asNumber?.());
