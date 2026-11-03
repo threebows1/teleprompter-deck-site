@@ -367,6 +367,8 @@ select.field { appearance: auto; }
 .done { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding: clamp(36px, 6vw, 60px) 20px; }
 .done h2 { margin: 8px 0 0; font-size: clamp(1.5rem, 3vw, 2rem); letter-spacing: -.03em; }
 .done__note { margin: 0 0 10px; color: var(--muted); max-width: 32rem; }
+.done__text { display: flex; flex-direction: column; align-items: center; gap: 12px; width: min(100%, 44rem); margin-bottom: 4px; }
+.done__text textarea { width: 100%; min-height: 220px; resize: vertical; text-align: start; font: inherit; font-size: .95rem; line-height: 1.55; padding: 14px 16px; }
 .done__check { width: 72px; height: 72px; border-radius: 22px; display: grid; place-items: center; background: var(--c); color: #fff; box-shadow: 0 16px 30px -14px color-mix(in srgb, var(--c) 80%, transparent); animation: pop .45s cubic-bezier(.2, 1.6, .4, 1); }
 @keyframes pop { from { transform: scale(.6); opacity: 0; } }
 .done__check .ic { width: 34px; height: 34px; }
@@ -447,6 +449,10 @@ select.field { appearance: auto; }
 .ed-pages[data-tool="edittext"] .tx { display: block; outline: 1px dashed rgba(102, 70, 232, .45); outline-offset: 1px; }
 .ed-pages[data-tool="edittext"] .tx:hover, .ed-pages[data-tool="edittext"] .tx:focus-visible { background: rgba(102, 70, 232, .1); outline: 1.5px solid var(--primary); }
 .obj:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.ed-scan { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2; display: none; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 10px 16px; border: 0; border-radius: 999px; background: var(--primary); color: #fff; font: inherit; font-size: .9rem; font-weight: 600; box-shadow: 0 8px 24px -8px rgba(54, 40, 140, .55); cursor: pointer; }
+.ed-scan:hover { filter: brightness(1.08); }
+.ed-scan .ic { width: 17px; height: 17px; flex: none; }
+.ed-pages[data-tool="edittext"] .ed-scan { display: inline-flex; }
 .sig-hint { margin: 10px 0 0; color: #b42318; font-size: .88rem; font-weight: 600; }
 .mask { position: absolute; pointer-events: none; }
 .obj { position: absolute; cursor: move; touch-action: none; }

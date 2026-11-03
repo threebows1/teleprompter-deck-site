@@ -8,7 +8,8 @@ import {
   h, icon, busy, tick, StandardFonts, degrees, BlendMode, loadLib, renderPage, baseName, pageSizes,
   pageFrame, boxAnchor, fontCanDraw, textAsPng, hexToRgb, imageForPdf, pickFiles, modal, STAY, uid, toast,
 } from './core.js';
-import { readPage, matchItems, dropOps, plan } from './content.js';
+import { readPage, matchItems, dropOps, plan, invisibleShows } from './content.js';
+import { langPicker, ocrWorker } from './more/security.js';
 
 const FONTS = {
   Helvetica: { label: 'Sans (Helvetica)', css: 'Helvetica, Arial, sans-serif', std: ['Helvetica', 'HelveticaBold'], base: 0.947 },
@@ -126,6 +127,7 @@ async function setupEditor(ctx, signMode) {
       ro.disconnect();
       document.removeEventListener('keydown', onKey);
       st.images?.forEach((_, src) => URL.revokeObjectURL(src));
+      st.ocr?.worker?.then((w) => w.terminate(), () => {});
     }
     return true;
   };
@@ -251,7 +253,7 @@ async function setupEditor(ctx, signMode) {
       kids.push(h('h3', { class: 'props__title' }, o.kind === 'sig' ? 'Signature' : 'Image'),
         h('p', { class: 'muted small' }, 'Drag to move it. Drag the corner handle to resize it.'));
     }
-    if (!o && st.tool === 'edittext') kids.push(h('h3', { class: 'props__title' }, 'Edit text'), h('p', { class: 'muted small' }, 'Every piece of text in the PDF has a box around it. Click one to type over it, or drag it somewhere else. To delete it, click it and clear the text. Scanned pages have no text to edit.'));
+    if (!o && st.tool === 'edittext') kids.push(h('h3', { class: 'props__title' }, 'Edit text'), h('p', { class: 'muted small' }, 'Every piece of text in the PDF has a box around it. Click one to type over it, or drag it somewhere else. To delete it, click it and clear the text. On a scanned page, press “Make the text on this page editable” first.'));
     if (!o && st.tool === 'select' && !signMode) kids.push(h('h3', { class: 'props__title' }, 'Select'), h('p', { class: 'muted small' }, 'Click something you added to move, resize or change it.'));
     // Without a mouse: put the signature, image or new text in the middle of
     // the page in view (then move it with the arrow keys).
@@ -337,7 +339,14 @@ async function setupEditor(ctx, signMode) {
       await page.getOperatorList(); // makes the fonts' real names available
       const vp = page.getViewport({ scale: 1 });
       const items = tc.items.filter((it) => typeof it.str === 'string');
-      try { matchItems(items, readPage(st.lib, i).shows); } catch (err) {
+      try {
+        const read = readPage(st.lib, i);
+        matchItems(items, read.shows);
+        // Invisible text (an OCR layer over a scan): taking out its commands
+        // leaves the picture of the words, so saving has to cover that too.
+        const hidden = invisibleShows(read.ops);
+        items.forEach((it) => { it.hidden = it.own.length > 0 && it.own.every((k) => hidden.has(k)); });
+      } catch (err) {
         console.warn('content stream', err);
         items.forEach((it) => { it.own = []; it.parent = -1; it.color = '#000000'; });
       }
@@ -379,10 +388,103 @@ async function setupEditor(ctx, signMode) {
       layer.prepend(b);
       placeBox(b);
     }
-    if (!items.some((it) => it.str.trim()) && !st.warnedScan && st.tool === 'edittext') {
-      st.warnedScan = true;
-      toast(`Page ${i + 1} has no text to edit. It is probably a scan or a picture.`);
+    layer.querySelector('.ed-scan')?.remove();
+    if (!items.some((it) => it.str.trim())) {
+      // A scan or a photo: offer to read its words so they can be edited.
+      const btn = h('button', { type: 'button', class: 'ed-scan', onclick: () => readScan(i) }, icon('edit'), 'Make the text on this page editable');
+      btn.addEventListener('pointerdown', (e) => e.stopPropagation());
+      layer.append(btn);
+      if (!st.warnedScan && st.tool === 'edittext') {
+        st.warnedScan = true;
+        toast(`Page ${i + 1} is a picture (a scan or photo), so its words are not text yet. Press “Make the text on this page editable” to read them.`);
+      }
     }
+  }
+
+  // Reads the words in a scanned page with OCR and makes each line editable.
+  // Saving covers the old words with the paper's colour and writes the new
+  // text on top; the rest of the picture stays as it was.
+  async function readScan(i) {
+    if (!st.ocr) {
+      const s = {};
+      const langs = langPicker(s);
+      const go = await modal({
+        title: 'Make the text editable',
+        body: () => [h('p', {}, 'This page is a picture, so its words have to be read first. Then click any line to change, move or delete it.'), langs.el, langs.note],
+        okText: 'Read the text',
+      });
+      if (!go || !s.langs.length) return;
+      st.ocr = { langs: s.langs };
+    }
+    let items = [];
+    try {
+      const label = sizes.length > 1 ? `Reading page ${i + 1}…` : 'Reading the page…';
+      st.ocr.worker ||= ocrWorker(st.ocr.langs, () => label);
+      const worker = await st.ocr.worker;
+      busy(label);
+      // About 300 dpi, but no bigger than Tesseract handles comfortably.
+      const scale = Math.min(300 / 72, 4200 / Math.max(sizes[i].w, sizes[i].h));
+      const canvas = await renderPage(doc.js, i, 0, { lazy: false, scale });
+      const { data } = await worker.recognize(canvas, {}, { blocks: true });
+      items = scanLines(data, canvas, canvas.width / sizes[i].w, i);
+      canvas.width = canvas.height = 0;
+    } catch (err) {
+      console.error(err);
+      st.ocr.worker = null;
+      toast(err?.message || 'Could not read this page.', 'bad');
+      return;
+    } finally { busy(false); }
+    if (gone()) return;
+    if (!items.length) return toast('No text was found on this page. It may be blurry, or in a language you did not pick.', 'bad');
+    st.texts[i] = Promise.resolve(items);
+    await showBoxes(i);
+    pickTool('edittext');
+    toast(`Found ${items.length} line${items.length > 1 ? 's' : ''} of text. Click one to change it.`);
+  }
+  // Tesseract's lines as editable text items, in view points. `k` is canvas
+  // pixels per point.
+  function scanLines(data, canvas, k, i) {
+    const cx = canvas.getContext('2d', { willReadFrequently: true });
+    const meas = document.createElement('canvas').getContext('2d');
+    meas.font = `100px ${FONTS.Helvetica.css}`;
+    const out = [];
+    for (const block of data.blocks || []) for (const para of block.paragraphs) for (const line of para.lines) {
+      const words = line.words.filter((w) => w.confidence >= 30 && w.text.trim());
+      if (!words.length) continue;
+      const str = words.map((w) => w.text.trim()).join(' ');
+      const b = { x0: Math.min(...words.map((w) => w.bbox.x0)), x1: Math.max(...words.map((w) => w.bbox.x1)), y0: Math.min(...words.map((w) => w.bbox.y0)), y1: Math.max(...words.map((w) => w.bbox.y1)) };
+      const ra = line.rowAttributes || {};
+      const row = (ra.rowHeight || ra.row_height || b.y1 - b.y0) / k;
+      const bl = line.baseline;
+      const basePx = bl && bl.x1 > bl.x0 ? bl.y0 + ((bl.y1 - bl.y0) * (b.x0 - bl.x0)) / (bl.x1 - bl.x0) : b.y1 - row * k * 0.2;
+      const w = (b.x1 - b.x0) / k;
+      // The size that makes the line as wide in Helvetica as in the scan,
+      // kept near the line's height.
+      const fit = (100 * w) / (meas.measureText(str).width || 1);
+      const size = clamp(fit, row * 0.6, row * 1.25);
+      const base = basePx / k;
+      out.push({
+        str, width: w, size, font: 'Helvetica', bold: false, upright: true, ocr: true, own: [], parent: -1,
+        color: inkColor(cx, b),
+        key: `${i}:${out.length}`,
+        box: { x: b.x0 / k, y: Math.min(b.y0 / k, base - size * 0.84), w, h: Math.max((b.y1 - b.y0) / k, base - b.y0 / k + size * 0.22), base },
+      });
+    }
+    return out;
+  }
+  // The colour of the letters in a box of the canvas: the darkest pixels.
+  function inkColor(cx, b) {
+    const x = Math.max(0, Math.floor(b.x0)), y = Math.max(0, Math.floor(b.y0));
+    const w = Math.max(1, Math.ceil(b.x1 - b.x0)), hh = Math.max(1, Math.ceil(b.y1 - b.y0));
+    let d;
+    try { d = cx.getImageData(x, y, w, hh).data; } catch { return '#000000'; }
+    const step = Math.max(1, Math.floor(d.length / 4 / 20000)) * 4;
+    const px = [];
+    for (let p = 0; p < d.length; p += step) px.push([d[p] * 0.3 + d[p + 1] * 0.59 + d[p + 2] * 0.11, p]);
+    px.sort((a, c) => a[0] - c[0]);
+    const dark = px.slice(0, Math.max(1, Math.round(px.length * 0.08)));
+    const avg = [0, 1, 2].map((o) => Math.round(dark.reduce((t, [, p]) => t + d[p + o], 0) / dark.length));
+    return '#' + avg.map((v) => v.toString(16).padStart(2, '0')).join('');
   }
   function placeBox(b) {
     const s = st.scale, r = b.box;
@@ -418,7 +520,12 @@ async function setupEditor(ctx, signMode) {
   async function takeText(i, key) {
     const items = await readText(i);
     const it = items[+key.split(':')[1]];
-    const o = add({ type: 'text', page: i, text: it.str, font: it.font, bold: it.bold, size: Math.round(it.size * 10) / 10, color: it.color, x: it.box.x, y: it.box.base - FONTS[it.font].base * it.size, orig: key });
+    let color = it.color;
+    if (it.hidden) { // invisible text has no colour of its own: take the scan's
+      const c = pageEls[i].canvas, k = c.width / sizes[i].w, r = it.box;
+      color = inkColor(c.getContext('2d', { willReadFrequently: true }), { x0: r.x * k, y0: r.y * k, x1: (r.x + r.w) * k, y1: (r.y + r.h) * k });
+    }
+    const o = add({ type: 'text', page: i, text: it.str.trim(), font: it.font, bold: it.bold, size: Math.round(it.size * 10) / 10, color, x: it.box.x, y: it.box.base - FONTS[it.font].base * it.size, orig: key });
     st.removed.set(key, paperAround(i, it.box));
     pageEls[i].layer.querySelector(`.tx[data-key="${key}"]`)?.remove();
     drawMasks();
@@ -792,15 +899,27 @@ async function saveEditor(ctx) {
     const { drop, redraw, cover } = plan(items, new Set(colors.keys()));
     if (drop.size) dropOps(lib, read, drop);
     const page = read.page;
+    // Invisible text (OCR over a scan) went with its commands, but the words
+    // are still in the picture underneath.
+    for (const j of colors.keys()) if (items[j].hidden && !cover.includes(j)) cover.push(j);
     for (const j of cover) { // text we couldn't find the command for (e.g. inside a form)
       const it = items[j];
+      if (it.ocr) { // words read from a scan here: the box is in view points
+        const f = pageFrame(page), kx = f.W / st.sizes[i].w, ky = f.H / st.sizes[i].h;
+        const W = (it.box.w + 2) * kx, H = (it.box.h + 2) * ky;
+        const a = boxAnchor(f, (it.box.x - 1) * kx + W / 2, (it.box.y - 1) * ky + H / 2, W, H);
+        page.drawRectangle({ x: a.x, y: a.y, width: W, height: H, rotate: a.rotate, color: hexToRgb(colors.get(j)) });
+        continue;
+      }
       const t = it.transform, s = Math.hypot(t[2], t[3]), len = Math.hypot(t[0], t[1]) || 1;
       const ux = -t[1] / len, uy = t[0] / len; // "up" for this text
-      page.drawRectangle({ x: t[4] - ux * 0.25 * s, y: t[5] - uy * 0.25 * s, width: Math.max(it.width, s * 0.3), height: s * 1.2, rotate: degrees((Math.atan2(t[1], t[0]) * 180) / Math.PI), color: hexToRgb(colors.get(j)) });
+      // Words in a scan sit less exactly on the OCR layer's baseline: cover more.
+      const below = it.hidden ? 0.4 : 0.25, tall = it.hidden ? 1.45 : 1.2, side = it.hidden ? 0.1 * s : 0;
+      page.drawRectangle({ x: t[4] - ux * below * s - uy * side, y: t[5] - uy * below * s + ux * side, width: Math.max(it.width, s * 0.3) + 2 * side, height: s * tall, rotate: degrees((Math.atan2(t[1], t[0]) * 180) / Math.PI), color: hexToRgb(colors.get(j)) });
     }
     for (const j of redraw) {
       const it = items[j];
-      if (!it.str) continue;
+      if (!it.str || it.hidden) continue; // drawing invisible text again would make it show
       const t = it.transform, s = Math.hypot(t[2], t[3]);
       const rotate = degrees((Math.atan2(t[1], t[0]) * 180) / Math.PI);
       const fnt = await font(it.font, it.bold);

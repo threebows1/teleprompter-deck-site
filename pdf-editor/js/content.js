@@ -310,6 +310,21 @@ function colorOf(shows, k) {
   return '#' + c.map((v) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0')).join('');
 }
 
+// The show commands drawn in render mode 3 or 7, which can't be seen (the
+// text layer OCR puts over a scan).
+export function invisibleShows(ops) {
+  const out = new Set();
+  const stack = [];
+  let tr = 0;
+  ops.forEach((o, k) => {
+    if (o.op === 'q') stack.push(tr);
+    else if (o.op === 'Q') tr = stack.pop() ?? tr;
+    else if (o.op === 'Tr') tr = o.args[0];
+    else if (SHOW.has(o.op) && (tr === 3 || tr === 7)) out.add(k);
+  });
+  return out;
+}
+
 const opsOf = (it) => (it.own.length ? it.own : it.parent >= 0 ? [it.parent] : []);
 
 // Everything that has to come out for the `removed` items to disappear, and

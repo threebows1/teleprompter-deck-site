@@ -1,7 +1,7 @@
 // OCR PDF, Redact PDF and Compare PDF.
 import {
   h, icon, registerIcons, busy, toast, tick, PDFDocument, StandardFonts, rgb, degrees, loadLib, loadScript,
-  renderPage, pageSizes, pageFrame, boxAnchor, fontCanDraw, baseName,
+  renderPage, pageSizes, pageFrame, boxAnchor, fontCanDraw, baseName, isImage, isPdf, openPdf, fmtSize, sortable, uid,
 } from '../core.js';
 import { field, segmented, check, fileRow, pageGrid, pdfOut } from '../ui.js';
 
@@ -174,6 +174,97 @@ const LANGS = [
   ['pol', 'Polish', 2.6], ['rus', 'Russian', 2.7], ['ind', 'Indonesian', 1.2],
 ];
 const BROWSER_LANG = { ur: 'urd', ar: 'ara', fa: 'fas', hi: 'hin', fr: 'fra', de: 'deu', es: 'spa', it: 'ita', pt: 'por', nl: 'nld', tr: 'tur', pl: 'pol', ru: 'rus', id: 'ind' };
+const LANG_KEY = 'pdftools.ocrLangs';
+
+// The languages picked last time, or English plus the browser's own.
+function savedLangs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LANG_KEY));
+    if (Array.isArray(v) && v.length && v.every((c) => LANGS.some((l) => l[0] === c))) return v;
+  } catch { /* private mode */ }
+  const own = BROWSER_LANG[(navigator.language || '').slice(0, 2)];
+  return own ? ['eng', own] : ['eng'];
+}
+
+// Language buttons and a note on the download, for OCR, Image to text and
+// Edit PDF. s.langs is kept up to date; onChange runs after each change.
+export function langPicker(s, onChange = () => {}) {
+  s.langs ||= savedLangs();
+  const langs = h('div', { class: 'sec-langs', role: 'group', 'aria-label': 'Languages in the document' });
+  const note = h('p', { class: 'sec-note' });
+  const draw = () => {
+    langs.replaceChildren(...LANGS.map(([code, name]) => {
+      const on = s.langs.includes(code);
+      return h('button', { type: 'button', class: 'sec-lang' + (on ? ' on' : ''), 'aria-pressed': String(on), onclick: () => {
+        s.langs = on ? s.langs.filter((c) => c !== code) : [...s.langs, code];
+        if (s.langs.length) try { localStorage.setItem(LANG_KEY, JSON.stringify(s.langs)); } catch { /* private mode */ }
+        draw();
+      } }, on && icon('check'), name);
+    }));
+    const picked = LANGS.filter(([code]) => s.langs.includes(code));
+    const mb = picked.reduce((t, l) => t + l[2], 0);
+    note.replaceChildren(icon('download'), h('span', {}, picked.length
+      ? `Downloads the ${andList(picked.map((l) => l[1]))} language model${picked.length > 1 ? 's' : ''} (about ${mb.toFixed(1)} MB) the first time. Your files stay on this device.`
+      : 'Pick the languages your text is in.'));
+    onChange();
+  };
+  draw();
+  return { el: h('div', { class: 'f' }, h('span', { class: 'f__label' }, 'Languages in the text'), langs), note };
+}
+
+// Starts Tesseract for `langs`, showing progress with busy(). `label()` is
+// what is being read at the moment. Call terminate() when done.
+export async function ocrWorker(langs, label = () => 'Reading…') {
+  busy('Loading the text reader…');
+  await loadScript('vendor/tesseract/tesseract.min.js');
+  try {
+    return await window.Tesseract.createWorker(langs.join('+'), 1, {
+      workerPath: vendorUrl('tesseract/worker.min.js'),
+      corePath: vendorUrl('tesseract/core'),
+      logger: (m) => {
+        const pct = Math.round((m.progress || 0) * 100);
+        if (m.status === 'recognizing text') busy(`${label()} ${pct}%`);
+        else if (/loading language/.test(m.status)) busy(`Getting the language model… ${pct}%`);
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    throw new Error('Could not download the language model. Check your connection and try again.');
+  }
+}
+
+// An image file drawn on a canvas at a size Tesseract reads well: small
+// pictures are enlarged (letters need about 20 pixels), huge ones reduced.
+export async function imageCanvas(file) {
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch {
+    throw new Error(/heic|heif/i.test(file.name + file.type)
+      ? `${file.name} is a HEIC photo, which this browser can’t open. Save it as JPG first.`
+      : `${file.name} could not be opened as a picture.`);
+  }
+  const side = Math.max(bmp.width, bmp.height);
+  const k = side < 1600 ? Math.min(2, 1600 / side) : Math.min(1, 4200 / side);
+  const c = h('canvas');
+  c.width = Math.max(1, Math.round(bmp.width * k));
+  c.height = Math.max(1, Math.round(bmp.height * k));
+  const cx = c.getContext('2d');
+  cx.fillStyle = '#fff'; // transparent PNGs read as black on black otherwise
+  cx.fillRect(0, 0, c.width, c.height);
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close();
+  return c;
+}
+
+// Tesseract's result as plain text: lines kept, a blank line between paragraphs.
+function plainText(data) {
+  const paras = [];
+  for (const block of data.blocks || []) for (const para of block.paragraphs) {
+    const lines = para.lines.map((l) => l.words.filter((w) => w.confidence >= 20).map((w) => w.text).join(' ').trim()).filter(Boolean);
+    if (lines.length) paras.push(lines.join('\n'));
+  }
+  return paras.join('\n\n');
+}
 
 const ocr = {
   id: 'ocr', keywords: 'scan searchable text recognition image to text', title: 'OCR PDF', icon: 'secOcr', color: '#0d9488', cat: 'optimize', action: 'Make searchable', wide: true, busyText: 'Getting ready…',
@@ -181,20 +272,12 @@ const ocr = {
   long: 'Reads the text in scanned pages and adds it to the PDF invisibly, so you can search, select and copy it. The pages look exactly the same.',
   setup(ctx) {
     const doc = ctx.items[0];
-    const own = BROWSER_LANG[(navigator.language || '').slice(0, 2)];
-    const s = ctx.state = { langs: own ? ['eng', own] : ['eng'], skip: true, withText: null };
+    const s = ctx.state = { skip: true, withText: null };
     const grid = pageGrid(doc);
     const status = h('p', { class: 'muted small' }, 'Checking which pages already have text…');
-    const note = h('p', { class: 'sec-note' });
-    const langs = h('div', { class: 'sec-langs', role: 'group', 'aria-label': 'Languages in the document' });
     const update = () => {
-      const picked = LANGS.filter(([code]) => s.langs.includes(code));
-      const mb = picked.reduce((t, l) => t + l[2], 0);
-      note.replaceChildren(icon('download'), h('span', {}, picked.length
-        ? `Downloads the ${andList(picked.map((l) => l[1]))} language model${picked.length > 1 ? 's' : ''} (about ${mb.toFixed(1)} MB) the first time. Your PDF stays on this device.`
-        : 'Pick the languages your document is in.'));
       const todo = s.withText ? s.withText.filter((t) => !(s.skip && t)).length : doc.pages;
-      ctx.action.disabled = !picked.length || !todo;
+      ctx.action.disabled = !s.langs.length || !todo;
       if (!s.withText) return;
       const n = s.withText.filter(Boolean).length;
       status.textContent = !n ? `No page has text yet. ${doc.pages === 1 ? 'The page' : `All ${doc.pages} pages`} will be read.`
@@ -203,22 +286,15 @@ const ocr = {
             : `All ${plural(doc.pages, 'page')} will be read.`;
       status.classList.toggle('bad', !todo);
     };
-    const drawLangs = () => langs.replaceChildren(...LANGS.map(([code, name]) => {
-      const on = s.langs.includes(code);
-      return h('button', { type: 'button', class: 'sec-lang' + (on ? ' on' : ''), 'aria-pressed': String(on), onclick: () => {
-        s.langs = on ? s.langs.filter((c) => c !== code) : [...s.langs, code];
-        drawLangs(); update();
-      } }, on && icon('check'), name);
-    }));
+    const langs = langPicker(s, () => status.isConnected && update());
     ctx.main.append(grid);
     ctx.side.append(
       fileRow(doc),
-      h('div', { class: 'f' }, h('span', { class: 'f__label' }, 'Languages in the document'), langs),
-      note,
+      langs.el,
+      langs.note,
       check('Skip pages that already have text', s.skip, (v) => { s.skip = v; update(); }),
       status,
       h('p', { class: 'muted small' }, 'Reading takes a few seconds per page. Clear, straight scans work best, and each extra language makes it a little slower.'));
-    drawLangs();
     update();
     Promise.all(allPages(doc).map((i) => hasRealText(doc.js, i).catch(() => false))).then((r) => {
       s.withText = r;
@@ -232,25 +308,9 @@ const ocr = {
     const withText = s.withText || await Promise.all(allPages(doc).map((i) => hasRealText(doc.js, i)));
     const want = allPages(doc).filter((i) => !(s.skip && withText[i]));
     if (!want.length) throw new Error('Every page already has text.');
-    busy('Loading the text reader…');
-    await loadScript('vendor/tesseract/tesseract.min.js');
     let reading = '';
-    let worker;
-    try {
-      worker = await window.Tesseract.createWorker(s.langs.join('+'), 1, {
-        workerPath: vendorUrl('tesseract/worker.min.js'),
-        corePath: vendorUrl('tesseract/core'),
-        logger: (m) => {
-          const pct = Math.round((m.progress || 0) * 100);
-          if (m.status === 'recognizing text') busy(`${reading} ${pct}%`);
-          else if (/loading language/.test(m.status)) busy(`Getting the language model… ${pct}%`);
-        },
-      });
-    } catch (err) {
-      console.error(err);
-      throw new Error('Could not download the language model. Check your connection and try again.');
-    }
     const lib = await loadLib(doc);
+    const worker = await ocrWorker(s.langs, () => reading);
     const pick = fontPicker(lib, { invisible: true });
     let words = 0;
     try {
@@ -319,6 +379,93 @@ async function addTextLayer(page, f, data, px, pick) {
   page.pushOperators(L.pushGraphicsState(), L.beginText(), L.setTextRenderingMode(L.TextRenderingMode.Invisible), ...ops, L.endText(), L.popGraphicsState());
   return ops.length / 4;
 }
+
+/* ---------- IMAGE TO TEXT ---------- */
+
+const imageToText = {
+  id: 'image-to-text', keywords: 'ocr image photo picture screenshot scan text extract copy read jpg png', title: 'Image to text', icon: 'secOcr', color: '#0891b2', cat: 'convert',
+  accept: { accept: 'image/*,.heic,.heif,application/pdf,.pdf', test: (f) => isImage(f) || isPdf(f), label: 'images or PDF files' },
+  multiple: true, wide: true, action: 'Get the text', busyText: 'Getting ready…',
+  desc: 'Copy the text out of photos, screenshots and scans.',
+  long: 'Reads the words in your pictures or scanned PDFs. Copy the text or download it as a .txt file.',
+  setup(ctx) {
+    const s = ctx.state = {};
+    const urls = new Map();
+    const list = h('div', { class: 'cards' });
+    const draw = () => {
+      list.replaceChildren(...ctx.items.map((it) => {
+        it.uid ||= uid();
+        let thumb;
+        if (isImage(it.file)) {
+          if (!urls.has(it.file)) urls.set(it.file, URL.createObjectURL(it.file));
+          thumb = h('img', { class: 'sec-thumb', src: urls.get(it.file), alt: '' });
+        } else thumb = h('span', { class: 'tp-doc', style: { '--tp': '#e5322d' } }, 'PDF');
+        return h('div', { class: 'card', 'data-id': it.uid },
+          h('div', { class: 'card__page' }, thumb),
+          h('div', { class: 'card__meta' }, h('strong', { title: it.name }, it.name), h('span', {}, fmtSize(it.size || 0))),
+          h('button', { class: 'iconbtn card__x', 'aria-label': `Remove ${it.name}`, onclick: () => { ctx.items.splice(ctx.items.indexOf(it), 1); draw(); } }, icon('x')),
+          h('span', { class: 'grip', title: 'Drag to reorder' }, icon('grip')));
+      }), h('button', { class: 'card card--add', onclick: async () => { ctx.items.push(...(await ctx.addMore())); draw(); } }, icon('plus'), 'Add more'));
+      ctx.action.disabled = !ctx.items.length || !s.langs?.length;
+    };
+    ctx.onDropMore = (more) => { ctx.items.push(...more); draw(); };
+    sortable(list, (ids) => ctx.items.sort((a, b) => ids.indexOf(a.uid) - ids.indexOf(b.uid)));
+    const langs = langPicker(s, () => list.isConnected && draw());
+    ctx.main.append(list);
+    ctx.side.append(langs.el, langs.note,
+      h('p', { class: 'muted small' }, 'Sharp, straight, well-lit pictures read best. Handwriting is usually not read. PDF pages that already have text are copied as they are.'));
+    draw();
+  },
+  async run(ctx) {
+    const s = ctx.state;
+    const many = ctx.items.length > 1;
+    const parts = [];
+    let reading = '';
+    let worker = null;
+    const read = async (canvas) => {
+      worker ||= await ocrWorker(s.langs, () => reading);
+      busy(reading);
+      const { data } = await worker.recognize(canvas, {}, { blocks: true });
+      canvas.width = canvas.height = 0;
+      return plainText(data);
+    };
+    try {
+      for (const [n, it] of ctx.items.entries()) {
+        const where = many ? ` (file ${n + 1} of ${ctx.items.length})` : '';
+        if (isPdf(it.file)) {
+          busy('Opening…');
+          const doc = await openPdf(it.file);
+          const pages = [];
+          for (const i of allPages(doc)) {
+            if (await hasRealText(doc.js, i)) { pages.push((await pageText(doc.js, i)).text.trim()); continue; }
+            reading = `Reading page ${i + 1} of ${doc.pages}${where}…`;
+            busy(reading);
+            const f = await viewFrame(doc.js, i);
+            pages.push(await read(await renderPage(doc.js, i, 0, { lazy: false, scale: Math.min(300 / 72, 4200 / Math.max(f.W, f.H)) })));
+          }
+          doc.js.destroy?.();
+          parts.push({ name: it.name, text: pages.map((t, i) => (doc.pages > 1 ? `[Page ${i + 1}]\n` : '') + t).join('\n\n') });
+        } else {
+          reading = many ? `Reading picture ${n + 1} of ${ctx.items.length}…` : 'Reading the picture…';
+          busy(reading);
+          parts.push({ name: it.name, text: await read(await imageCanvas(it.file)) });
+        }
+      }
+    } finally {
+      worker?.terminate();
+    }
+    const text = parts.map((p) => (many ? `===== ${p.name} =====\n` : '') + p.text.trim()).join('\n\n\n').trim();
+    const words = (text.match(/[\p{L}\p{N}]+/gu) || []).length;
+    const empty = parts.filter((p) => !p.text.trim()).map((p) => p.name);
+    return {
+      files: [{ name: `${many ? 'image-text' : baseName(ctx.items[0].name)}.txt`, bytes: new Blob([text + '\n'], { type: 'text/plain' }), type: 'text/plain' }],
+      text,
+      title: words ? 'Here is your text' : 'No text was found',
+      note: (words ? `${plural(words, 'word')} found.` : 'The pictures may be blurry, or in a language you did not pick.')
+        + (words && empty.length ? ` No text in ${andList(empty)}.` : ''),
+    };
+  },
+};
 
 /* ---------- REDACT ---------- */
 
@@ -1037,4 +1184,4 @@ async function report(oldDoc, newDoc, r) {
   return out.save();
 }
 
-export const SECURITY_MORE = [ocr, redact, compare];
+export const SECURITY_MORE = [ocr, imageToText, redact, compare];

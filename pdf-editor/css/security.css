@@ -20,6 +20,7 @@
 .sec-lang .ic { width: 14px; height: 14px; }
 .sec-note { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 12px 14px; border-radius: 13px; background: #eef8fd; color: #0b5d82; font-size: .86rem; line-height: 1.45; }
 .sec-note .ic { width: 17px; height: 17px; margin-top: 1px; }
+.sec-thumb { width: 100%; height: 100%; object-fit: contain; }
 .sec-tag { position: absolute; top: 10px; left: 10px; padding: 2px 8px; border-radius: 999px; background: #0ea5e9; color: #fff; font-size: .7rem; font-weight: 700; }
 
 /* ---------- Redact ---------- */

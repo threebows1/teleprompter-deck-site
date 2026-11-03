@@ -4,7 +4,7 @@
 // in the browser.
 import { h, icon, busy, tick, toast, registerIcons, loadScript, loadLib, renderPage, baseName, degrees } from '../core.js';
 import { field, segmented, choiceCards, check, fileHero, fileRow, pdfOut } from '../ui.js';
-import { readPage, matchItems, dropOps } from '../content.js';
+import { readPage, matchItems, dropOps, invisibleShows } from '../content.js';
 
 registerIcons({
   toWord: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="m8 12 1.5 5 2.5-4 2.5 4 1.5-5"/>',
@@ -21,7 +21,6 @@ const MIME = {
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
-const SHOWS = new Set(['Tj', 'TJ', "'", '"']);
 const BULLET = /^[•●○◦▪■□‣⁃∙·*–-]\s+/;
 const NUMBERED = /^(\d{1,3})[.)]\s+/;
 const MARKER = /^([•●○◦▪■□‣⁃∙·*–-]|\d{1,3}[.)])$/;
@@ -90,20 +89,6 @@ function family(name, generic) {
   const f = name.split(/[-,+]/)[0].replace(/(PS)?MT$|PS$/, '').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
   if (f && !/^(CIDFont|Font|[A-Z]\d+$|g_)/i.test(f)) return f;
   return { serif: 'Times New Roman', monospace: 'Courier New' }[generic] || 'Arial';
-}
-
-// Text drawn in render mode 3 or 7 can't be seen.
-function invisibleShows(ops) {
-  const out = new Set();
-  const stack = [];
-  let tr = 0;
-  ops.forEach((o, k) => {
-    if (o.op === 'q') stack.push(tr);
-    else if (o.op === 'Q') tr = stack.pop() ?? tr;
-    else if (o.op === 'Tr') tr = o.args[0];
-    else if (SHOWS.has(o.op) && (tr === 3 || tr === 7)) out.add(k);
-  });
-  return out;
 }
 
 // The corners of a constructPath, in path space.

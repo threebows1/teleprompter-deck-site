@@ -1008,7 +1008,7 @@ const unlock = {
 // Same order as iLovePDF's menu. Ids not listed go at the end.
 const ORDER = [
   'merge', 'split', 'remove-pages', 'extract-pages', 'organize', 'scan',
-  'compress', 'repair', 'ocr',
+  'compress', 'repair', 'ocr', 'image-to-text',
   'jpg-to-pdf', 'word-to-pdf', 'ppt-to-pdf', 'excel-to-pdf', 'html-to-pdf',
   'pdf-to-jpg', 'pdf-to-word', 'pdf-to-ppt', 'pdf-to-excel', 'pdf-to-pdfa', 'pdf-to-markdown',
   'rotate', 'page-numbers', 'watermark', 'crop', 'edit', 'forms',

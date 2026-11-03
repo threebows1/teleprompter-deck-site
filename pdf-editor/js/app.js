@@ -370,11 +370,12 @@ function startWork(tool, body, items) {
 const NEXT = {
   merge: ['compress', 'organize', 'page-numbers', 'protect'],
   split: ['merge', 'compress', 'organize', 'pdf-to-jpg'],
-  'jpg-to-pdf': ['compress', 'merge', 'sign', 'protect'],
+  'jpg-to-pdf': ['edit', 'ocr', 'compress', 'merge'],
   'pdf-to-jpg': ['jpg-to-pdf', 'compress', 'split', 'edit'],
   protect: ['unlock', 'compress', 'sign', 'merge'],
-  scan: ['ocr', 'compress', 'merge', 'sign'],
-  ocr: ['pdf-to-word', 'compress', 'redact', 'translate'],
+  scan: ['ocr', 'edit', 'compress', 'merge'],
+  ocr: ['edit', 'pdf-to-word', 'compress', 'translate'],
+  'image-to-text': ['jpg-to-pdf', 'ocr', 'scan', 'translate'],
   repair: ['compress', 'ocr', 'unlock', 'merge'],
   redact: ['protect', 'compress', 'sign', 'merge'],
   forms: ['sign', 'protect', 'compress', 'merge'],
@@ -426,7 +427,12 @@ function showDone(tool, body, result) {
     h('span', { class: 'done__check' }, icon('check')),
     h('h2', {}, result.title || 'Your file is ready'),
     result.note && h('p', { class: 'done__note' }, result.note),
-    h('button', { class: 'btn btn--solid btn--big', onclick: save }, icon('download'),
+    result.text && h('div', { class: 'done__text' },
+      h('textarea', { class: 'field', readonly: true, rows: 12, 'aria-label': 'The text', dir: 'auto' }, result.text),
+      h('button', { class: 'btn btn--solid btn--big', onclick: async () => {
+        try { await navigator.clipboard.writeText(result.text); toast('Text copied.'); } catch { toast('Could not copy. Download the file instead.', 'bad'); }
+      } }, icon('copy'), 'Copy text')),
+    h('button', { class: 'btn btn--big ' + (result.text ? 'btn--soft' : 'btn--solid'), onclick: save }, icon('download'),
       files.length === 1 ? `Download ${files[0].name.split('.').pop().toUpperCase()}` : `Download all (${files.length}) as ZIP`),
     h('p', { class: 'muted' }, files.length === 1 ? `${files[0].name} · ${fmtSize(total)}` : fmtSize(total)),
     kept,
@@ -438,7 +444,7 @@ function showDone(tool, body, result) {
       h('p', { class: 'f__label' }, 'Continue with'),
       h('div', { class: 'nexts' }, next.map((t) => h('a', { class: 'next', href: '#' + t.id, style: { '--c': t.color } },
         h('span', { class: 'tile__icon' }, icon(t.icon)), h('span', {}, t.title)))))));
-  save();
+  if (!result.text) save(); // text is shown to copy; the file is there if wanted
 }
 
 route();
