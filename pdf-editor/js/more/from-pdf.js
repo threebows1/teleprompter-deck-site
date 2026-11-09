@@ -38,6 +38,13 @@ const clean = (t) => t
   .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, '')
   .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
 
+let ruler;
+const textWidth = (s, size) => {
+  ruler ||= document.createElement('canvas').getContext('2d');
+  ruler.font = '100px Arial, Helvetica, sans-serif';
+  return (ruler.measureText(s).width / 100) * size;
+};
+
 async function readPdfPage(doc, i, lib) {
   const page = await doc.js.getPage(i + 1);
   const vp = page.getViewport({ scale: 1 });
@@ -54,9 +61,33 @@ async function readPdfPage(doc, i, lib) {
       hidden = invisibleShows(read.ops);
     } catch (err) { console.warn('content stream not read', err); read = null; }
   }
-  const links = (await page.getAnnotations()).filter((a) => a.subtype === 'Link' && safeUrl(a.url))
+  const annots = await page.getAnnotations();
+  const links = annots.filter((a) => a.subtype === 'Link' && safeUrl(a.url))
     .map((a) => ({ url: a.url, r: normRect(vp.convertToViewportRectangle(a.rect)) }));
   const items = [];
+  // What is typed into form fields and comment boxes is drawn by the
+  // annotation, not the page, so pdf.js leaves it out of the page's text.
+  for (const a of annots) {
+    if (a.hidden || a.noView) continue;
+    let str = '';
+    if (a.subtype === 'Widget' && a.fieldType === 'Tx' && typeof a.fieldValue === 'string') str = a.fieldValue;
+    else if (a.subtype === 'Widget' && a.fieldType === 'Ch') str = [].concat(a.fieldValue || []).join(', ');
+    else if (a.subtype === 'Widget' && a.checkBox) str = a.fieldValue && a.fieldValue !== 'Off' ? '☒' : '☐';
+    else if (a.subtype === 'FreeText') str = a.contentsObj?.str || '';
+    if (!str.trim()) continue;
+    const r = normRect(vp.convertToViewportRectangle(a.rect));
+    const rows = str.split(/\r\n|\r|\n/);
+    const size = clamp(a.defaultAppearanceData?.fontSize || Math.min(11, ((r[3] - r[1]) / rows.length) * 0.7), 4, 24);
+    const multi = rows.length > 1 || a.multiLine;
+    rows.forEach((row, k) => {
+      if (!row.trim()) return;
+      const y = multi ? r[1] + size * (1.15 * k + 1) + 1 : r[3] - ((r[3] - r[1]) - size) / 2 - size * 0.2;
+      items.push({
+        str: clean(row), x: r[0] + 2, y, w: textWidth(row, size), size,
+        font: 'Arial', bold: false, italic: false, color: '#000000', hidden: false, ops: [], link: null,
+      });
+    });
+  }
   for (const it of raw) {
     if (!it.str.trim()) continue;
     const t = Util.transform(vp.transform, it.transform);
@@ -91,49 +122,105 @@ function family(name, generic) {
   return { serif: 'Times New Roman', monospace: 'Courier New' }[generic] || 'Arial';
 }
 
-// The corners of a constructPath, in path space.
-function pathBox(ops, coords) {
-  const xs = [], ys = [];
-  let at = 0;
+// A path's pieces, each a list of points (curves by their control points).
+// A `re` is a piece of its own, marked as a rectangle.
+function subpaths(ops, coords) {
+  const out = [];
+  let cur = null, at = 0;
   for (const op of ops) {
     const n = { [OPS.moveTo]: 2, [OPS.lineTo]: 2, [OPS.curveTo]: 6, [OPS.curveTo2]: 4, [OPS.curveTo3]: 4, [OPS.rectangle]: 4 }[op] || 0;
     const c = coords.slice(at, at + n);
     at += n;
-    if (op === OPS.rectangle) { xs.push(c[0], c[0] + c[2]); ys.push(c[1], c[1] + c[3]); } else for (let j = 0; j < n; j += 2) { xs.push(c[j]); ys.push(c[j + 1]); }
+    if (op === OPS.rectangle) {
+      out.push({ pts: [[c[0], c[1]], [c[0] + c[2], c[1]], [c[0] + c[2], c[1] + c[3]], [c[0], c[1] + c[3]]], rect: true });
+      cur = null;
+    } else if (op === OPS.moveTo) {
+      cur = { pts: [[c[0], c[1]]] };
+      out.push(cur);
+    } else if (n && cur) {
+      for (let j = 0; j < n; j += 2) cur.pts.push([c[j], c[j + 1]]);
+      if (op !== OPS.lineTo) cur.curved = true;
+    }
   }
-  return xs.length ? [[Math.min(...xs), Math.min(...ys)], [Math.max(...xs), Math.max(...ys)]] : null;
+  return out.filter((sp) => sp.pts.length > 1);
 }
 
-// From the operator list: where pictures are painted (overlapping ones
-// merge), and small filled dots, which are list bullets drawn as shapes.
+const FILLS = new Set([OPS.fill, OPS.eoFill, OPS.fillStroke, OPS.eoFillStroke, OPS.closeFillStroke, OPS.closeEOFillStroke]);
+const STROKES = new Set([OPS.stroke, OPS.closeStroke, OPS.fillStroke, OPS.eoFillStroke, OPS.closeFillStroke, OPS.closeEOFillStroke]);
+const hex = (c) => '#' + [...c].slice(0, 3).map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+const whiteish = (c) => c[0] > 245 && c[1] > 245 && c[2] > 245;
+
+// From the operator list, in view space: where pictures are painted
+// (overlapping ones merge), small filled dots (list bullets drawn as shapes),
+// thin lines (table borders), filled boxes (shading behind text and cells)
+// and other shapes (vector logos, charts).
 function drawings({ fnArray, argsArray }, vp) {
   const stack = [];
-  let ctm = [1, 0, 0, 1, 0, 0];
-  const boxes = [];
-  const dots = [];
+  let gs = { ctm: [1, 0, 0, 1, 0, 0], fill: [0, 0, 0], stroke: [0, 0, 0], lw: 1 };
+  const boxes = [], srcs = [], dots = [], rules = [], fills = [], shapes = [];
   const viewBox = (corners) => {
-    const m = Util.transform(vp.transform, ctm);
+    const m = Util.transform(vp.transform, gs.ctm);
     const pts = corners.map((p) => Util.applyTransform(p, m));
     const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
     return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
   };
+  const rule = (x0, y0, x1, y1, width, color) => {
+    if (Math.abs(y1 - y0) <= Math.abs(x1 - x0)) {
+      if (Math.abs(x1 - x0) >= 3) rules.push({ dir: 'h', pos: (y0 + y1) / 2, from: Math.min(x0, x1), to: Math.max(x0, x1), width, color });
+    } else if (Math.abs(y1 - y0) >= 3) rules.push({ dir: 'v', pos: (x0 + x1) / 2, from: Math.min(y0, y1), to: Math.max(y0, y1), width, color });
+  };
   for (let k = 0; k < fnArray.length; k++) {
     const fn = fnArray[k], a = argsArray[k];
-    if (fn === OPS.save) stack.push(ctm);
-    else if (fn === OPS.restore) ctm = stack.pop() || ctm;
-    else if (fn === OPS.transform) ctm = Util.transform(ctm, a);
-    else if (fn === OPS.paintFormXObjectBegin) { stack.push(ctm); if (a[0]?.length === 6) ctm = Util.transform(ctm, a[0]); }
-    else if (fn === OPS.paintFormXObjectEnd) ctm = stack.pop() || ctm;
-    else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject || fn === OPS.paintJpegXObject) {
+    if (fn === OPS.save) { stack.push(gs); gs = { ...gs }; }
+    else if (fn === OPS.restore) gs = stack.pop() || gs;
+    else if (fn === OPS.transform) gs.ctm = Util.transform(gs.ctm, a);
+    else if (fn === OPS.paintFormXObjectBegin) { stack.push(gs); gs = { ...gs }; if (a[0]?.length === 6) gs.ctm = Util.transform(gs.ctm, a[0]); }
+    else if (fn === OPS.paintFormXObjectEnd) gs = stack.pop() || gs;
+    else if (fn === OPS.setFillRGBColor) gs.fill = [a[0], a[1], a[2]];
+    else if (fn === OPS.setStrokeRGBColor) gs.stroke = [a[0], a[1], a[2]];
+    else if (fn === OPS.setLineWidth) gs.lw = a[0];
+    else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject || fn === OPS.paintJpegXObject || fn === OPS.paintImageMaskXObject) {
       const v = viewBox([[0, 0], [1, 0], [0, 1], [1, 1]]);
       const b = [clamp(v[0], 0, vp.width), clamp(v[1], 0, vp.height), clamp(v[2], 0, vp.width), clamp(v[3], 0, vp.height)];
-      if (b[2] - b[0] >= 16 && b[3] - b[1] >= 16) boxes.push(b);
-    } else if (fn === OPS.constructPath && [OPS.fill, OPS.eoFill].includes(fnArray[k + 1])) {
-      const pb = pathBox(a[0], a[1]);
-      if (!pb) continue;
-      const b = viewBox([pb[0], [pb[1][0], pb[0][1]], [pb[0][0], pb[1][1]], pb[1]]);
-      const w = b[2] - b[0], hh = b[3] - b[1];
-      if (w >= 1.5 && w <= 8 && hh >= 1.5 && hh <= 8 && Math.max(w, hh) / Math.min(w, hh) < 1.5) dots.push(b);
+      if (b[2] - b[0] >= 16 && b[3] - b[1] >= 16) {
+        boxes.push(b);
+        if (fn !== OPS.paintImageMaskXObject) srcs.push({ box: b, src: a[0], m: Util.transform(vp.transform, gs.ctm) });
+      }
+      else if (b[2] - b[0] >= 3 && b[3] - b[1] >= 3) shapes.push({ box: b, color: '#000000' }); // a small piece of a logo
+    } else if (fn === OPS.constructPath) {
+      const paint = fnArray[k + 1];
+      const doFill = FILLS.has(paint), doStroke = STROKES.has(paint);
+      if (!doFill && !doStroke) continue; // a clipping path
+      const m = Util.transform(vp.transform, gs.ctm);
+      const scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2]));
+      const lw = Math.max(0.5, gs.lw * scale);
+      for (const sp of subpaths(a[0], a[1])) {
+        const pts = sp.pts.map((p) => Util.applyTransform(p, m));
+        const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+        const b = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+        const w = b[2] - b[0], hh = b[3] - b[1];
+        const closedPts = pts.length === 5 && Math.hypot(pts[4][0] - pts[0][0], pts[4][1] - pts[0][1]) < 0.5 ? pts.slice(0, 4) : pts;
+        const isRect = sp.rect || (!sp.curved && closedPts.length === 4 && closedPts.every((p, j) => {
+          const q = closedPts[(j + 1) % 4];
+          return Math.abs(p[0] - q[0]) < 0.5 || Math.abs(p[1] - q[1]) < 0.5;
+        }));
+        if (doFill) {
+          if (w >= 1.5 && w <= 8 && hh >= 1.5 && hh <= 8 && Math.max(w, hh) / Math.min(w, hh) < 1.5) dots.push(b);
+          if (isRect && Math.min(w, hh) <= 2.5) { // a line drawn as a thin box
+            const t = Math.max(0.5, Math.min(w, hh)), my = (b[1] + b[3]) / 2, mx = (b[0] + b[2]) / 2;
+            if (w >= hh) rule(b[0], my, b[2], my, t, hex(gs.fill));
+            else rule(mx, b[1], mx, b[3], t, hex(gs.fill));
+          } else if (!whiteish(gs.fill)) (isRect ? fills : shapes).push({ box: b, color: hex(gs.fill) });
+        }
+        if (doStroke) {
+          if (isRect) {
+            rule(b[0], b[1], b[2], b[1], lw, hex(gs.stroke)); rule(b[0], b[3], b[2], b[3], lw, hex(gs.stroke));
+            rule(b[0], b[1], b[0], b[3], lw, hex(gs.stroke)); rule(b[2], b[1], b[2], b[3], lw, hex(gs.stroke));
+          } else if (!sp.curved && pts.every((p, j) => !j || Math.abs(p[0] - pts[j - 1][0]) < 0.5 || Math.abs(p[1] - pts[j - 1][1]) < 0.5)) {
+            for (let j = 1; j < pts.length; j++) rule(pts[j - 1][0], pts[j - 1][1], pts[j][0], pts[j][1], lw, hex(gs.stroke));
+          } else if (!whiteish(gs.stroke)) shapes.push({ box: b, color: hex(gs.stroke) });
+        }
+      }
     }
   }
   for (let merged = true; merged;) {
@@ -151,7 +238,10 @@ function drawings({ fnArray, argsArray }, vp) {
     }
   }
   const area = vp.width * vp.height;
-  return { images: boxes.map((b) => ({ box: b, full: (b[2] - b[0]) * (b[3] - b[1]) > area * 0.85 })), dots };
+  const images = boxes.map((b) => ({ box: b, full: (b[2] - b[0]) * (b[3] - b[1]) > area * 0.85 }));
+  // A full-page picture keeps where it came from, to be taken out on its own (see backgroundJpeg).
+  for (const im of images) if (im.full) Object.assign(im, srcs.find((x) => (x.box[2] - x.box[0]) * (x.box[3] - x.box[1]) > area * 0.85) || {}, { box: im.box });
+  return { images, dots, rules, fills, shapes: shapes.slice(0, 4000) };
 }
 
 /* ---------- lines, segments and runs ---------- */
@@ -225,23 +315,25 @@ function tidy(runs) {
 function mergeRuns(runs) {
   const out = [];
   for (const r of runs) {
-    if (!r.text) continue;
+    if (!r.text && !r.br) continue;
     const last = out[out.length - 1];
-    if (last && sameStyle(last, r)) last.text += r.text;
+    if (last && !r.br && !last.br && sameStyle(last, r)) last.text += r.text;
     else out.push({ ...r });
   }
   return out;
 }
 
 // The runs of several lines as one paragraph: lines joined with a space, and
-// a word broken with a hyphen at the end of a line put back together.
-function blockRuns(lines) {
+// a word broken with a hyphen at the end of a line put back together. With
+// `breaks`, a line broken on purpose (l.br) starts on a new line.
+function blockRuns(lines, breaks = false) {
   const out = [];
   lines.forEach((l, k) => {
     const runs = joinSegs(l.segs);
     if (k && out.length && runs.length) {
       const last = out[out.length - 1];
-      if (/­$/.test(last.text)) last.text = last.text.slice(0, -1);
+      if (breaks && l.br) out.push({ ...last, text: '', br: true, link: null });
+      else if (/­$/.test(last.text)) last.text = last.text.slice(0, -1);
       else if (/\p{L}-$/u.test(last.text) && /^\p{Ll}/u.test(runs[0].text)) last.text = last.text.slice(0, -1);
       else last.text += ' ';
     }
@@ -289,8 +381,19 @@ function tableAt(lines, i) {
   };
 }
 
-// Whether line `l` carries on the paragraph `b`.
-function continues(b, l, lead) {
+// Whether line `l` carries on the paragraph `b`: false, true, or 'br' when it
+// does after a line break made on purpose (the line before had room for this
+// line's first word, as in an address). `width` is how wide the text runs.
+function continues(b, l, lead, width) {
+  const go = carriesOn(b, l, lead);
+  if (!go || !width) return go;
+  const p = b.lines[b.lines.length - 1];
+  const text = lineText(l);
+  const first = (l.x1 - l.x0) * ((text.indexOf(' ') + 1 || text.length) / Math.max(1, text.length));
+  return width - (p.x1 - p.x0) > first + l.size ? 'br' : true;
+}
+
+function carriesOn(b, l, lead) {
   const p = b.lines[b.lines.length - 1];
   if (Math.abs(l.size - p.size) > p.size * 0.12) return false;
   if (l.y - p.y > Math.max(lead, p.size * 1.05) * 1.35) return false;
@@ -315,50 +418,316 @@ function textBlock(line) {
   };
 }
 
+const boxOf = (it) => [it.x, it.y - it.size * 0.85, it.x + it.w, it.y + it.size * 0.25];
+const centerOf = (it) => [it.x + it.w / 2, it.y - it.size * 0.35];
+const within = (p, b, tol = 1) => p[0] >= b[0] - tol && p[0] <= b[2] + tol && p[1] >= b[1] - tol && p[1] <= b[3] + tol;
+const areaOf = (b) => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
+const overlapArea = (a, b) => Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+const textEl = (it) => { const b = boxOf(it); return { kind: 'text', it, x0: b[0], top: b[1], x1: b[2], bottom: b[3], size: it.size }; };
+const flatBlocks = (blocks) => blocks.flatMap((b) => (b.type === 'cols' ? b.cols.flatMap((c) => flatBlocks(c.blocks)) : [b]));
+const mostCommon = (list) => [...list.reduce((m, v) => m.set(v, (m.get(v) || 0) + 1), new Map())].sort((a, b) => b[1] - a[1])[0]?.[0];
+
+function unionFind(n) {
+  const p = [...Array(n).keys()];
+  const find = (x) => { while (p[x] !== x) x = p[x] = p[p[x]]; return x; };
+  return { find, union: (a, b) => { p[find(a)] = find(b); } };
+}
+
+// Positions closer than `tol` become one (their average).
+function cluster(vals, tol) {
+  const out = [];
+  for (const v of vals.slice().sort((a, b) => a - b)) {
+    const c = out[out.length - 1];
+    if (c && v - c.max <= tol) { c.max = v; c.sum += v; c.n++; } else out.push({ max: v, sum: v, n: 1 });
+  }
+  return out.map((c) => c.sum / c.n);
+}
+
+// Tables drawn with lines: a set of crossing horizontal and vertical lines
+// is a grid. A missing line between two squares merges them into one cell.
+// The text in each cell is laid out on its own; a filled box under a cell
+// is its shading.
+function gridTables(pg, items) {
+  const merge = (list) => {
+    const out = [];
+    for (const r of list.slice().sort((a, b) => a.pos - b.pos || a.from - b.from)) {
+      const o = out.find((q) => Math.abs(q.pos - r.pos) <= 1.5 && r.from <= q.to + 2 && r.to >= q.from - 2);
+      if (o) { o.from = Math.min(o.from, r.from); o.to = Math.max(o.to, r.to); } else out.push({ ...r });
+    }
+    return out;
+  };
+  const Hs = merge(pg.rules.filter((r) => r.dir === 'h')), Vs = merge(pg.rules.filter((r) => r.dir === 'v'));
+  if (Hs.length < 2 || Vs.length < 2 || Hs.length * Vs.length > 400000) return [];
+  const all = [...Hs, ...Vs];
+  const uf = unionFind(all.length);
+  Hs.forEach((hr, i) => Vs.forEach((vr, j) => {
+    if (vr.pos >= hr.from - 2 && vr.pos <= hr.to + 2 && hr.pos >= vr.from - 2 && hr.pos <= vr.to + 2) uf.union(i, Hs.length + j);
+  }));
+  const comps = new Map();
+  all.forEach((r, i) => { const k = uf.find(i); if (!comps.has(k)) comps.set(k, []); comps.get(k).push(r); });
+  const tables = [];
+  const taken = new Set();
+  for (const rs of comps.values()) {
+    const H = rs.filter((r) => r.dir === 'h'), V = rs.filter((r) => r.dir === 'v');
+    if (H.length < 2 || V.length < 2) continue;
+    const xs = cluster(V.map((r) => r.pos), 3), ys = cluster(H.map((r) => r.pos), 3);
+    if (xs.length < 2 || ys.length < 2) continue;
+    const box = [xs[0], ys[0], xs[xs.length - 1], ys[ys.length - 1]];
+    if (xs.length === 2 && ys.length === 2 && areaOf(box) > pg.w * pg.h * 0.4) continue; // a frame round the page
+    const inTable = items.filter((it) => !taken.has(it) && within(centerOf(it), box, 0.5));
+    if (!inTable.length) continue; // a drawing, not a table
+    const covered = (list, pos, a, b) => {
+      let len = 0;
+      for (const r of list) if (Math.abs(r.pos - pos) <= 3) len += Math.max(0, Math.min(b, r.to) - Math.max(a, r.from));
+      return len >= (b - a) * 0.6;
+    };
+    const nr = ys.length - 1, nc = xs.length - 1;
+    const g = unionFind(nr * nc);
+    for (let r = 0; r < nr; r++) for (let c = 0; c < nc; c++) {
+      if (c + 1 < nc && !covered(V, xs[c + 1], ys[r], ys[r + 1])) g.union(r * nc + c, r * nc + c + 1);
+      if (r + 1 < nr && !covered(H, ys[r + 1], xs[c], xs[c + 1])) g.union(r * nc + c, (r + 1) * nc + c);
+    }
+    // Cells are groups of squares; a group that isn't a rectangle stays as squares.
+    const groups = new Map();
+    for (let k = 0; k < nr * nc; k++) { const root = g.find(k); if (!groups.has(root)) groups.set(root, []); groups.get(root).push(k); }
+    const cellOf = new Array(nr * nc);
+    const cells = [];
+    for (const ks of groups.values()) {
+      const rows = ks.map((k) => Math.floor(k / nc)), cols = ks.map((k) => k % nc);
+      const r0 = Math.min(...rows), r1 = Math.max(...rows), c0 = Math.min(...cols), c1 = Math.max(...cols);
+      const parts = (r1 - r0 + 1) * (c1 - c0 + 1) === ks.length ? [[r0, r1, c0, c1, ks]] : ks.map((k) => [Math.floor(k / nc), Math.floor(k / nc), k % nc, k % nc, [k]]);
+      for (const [a, b, c, d, kk] of parts) {
+        const cell = { r0: a, r1: b, c0: c, c1: d, items: [] };
+        cells.push(cell);
+        kk.forEach((k) => (cellOf[k] = cell));
+      }
+    }
+    const at = (list, v) => { let i = 0; while (i < list.length - 2 && v >= list[i + 1]) i++; return i; };
+    for (const it of inTable) {
+      cellOf[at(ys, centerOf(it)[1]) * nc + at(xs, it.x + Math.min(it.w / 2, it.size))].items.push(it);
+      taken.add(it);
+    }
+    for (const cell of cells) {
+      const b = [xs[cell.c0], ys[cell.r0], xs[cell.c1 + 1], ys[cell.r1 + 1]];
+      const mid = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
+      cell.box = b;
+      cell.fill = pg.fills.filter((f) => within(mid, f.box, 0) && overlapArea(f.box, b) >= areaOf(b) * 0.5)
+        .sort((p, q) => areaOf(p.box) - areaOf(q.box))[0]?.color || null;
+      cell.edges = { top: covered(H, b[1], b[0], b[2]), bottom: covered(H, b[3], b[0], b[2]), left: covered(V, b[0], b[1], b[3]), right: covered(V, b[2], b[1], b[3]) };
+      cell.blocks = cell.items.length ? flowBlocks(cell.items.map(textEl), pg, b[2] - b[0] - 8) : [];
+      cell.runs = cell.items.length ? blockRuns(toLines(cell.items)) : [];
+    }
+    cells.sort((p, q) => p.r0 - q.r0 || p.c0 - q.c0);
+    // As rows and columns of text too, for Excel and Markdown.
+    const grid = Array.from({ length: nr }, (_, r) => Array.from({ length: nc }, (_, c) => {
+      const cell = cellOf[r * nc + c];
+      return cell.r0 === r && cell.c0 === c ? cell.runs : [];
+    }));
+    tables.push({
+      type: 'table', ruled: true, xs, ys, cellList: cells, cells: grid, cols: xs.slice(0, -1).map((x, c) => ({ x0: x, x1: xs[c + 1] })),
+      x0: box[0], x1: box[2], top: box[1], bottom: box[3],
+      color: mostCommon(rs.map((r) => r.color)) || '#000000', width: median(rs.map((r) => r.width)) || 0.75,
+    });
+  }
+  return tables;
+}
+
+// Vector drawings away from the text (logos, icons, charts) become pictures,
+// together with the embedded images. A filled box with text on it is the
+// text's background instead. A small drawing with only a few words on it
+// (a logo with its name) is a picture, words included.
+function pictures(pg, items, tables) {
+  const pageArea = pg.w * pg.h;
+  const inTable = (b) => tables.some((t) => within([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2], [t.x0, t.top, t.x1, t.bottom], 0));
+  const centers = items.map(centerOf);
+  const panels = [], parts = [];
+  for (const f of pg.fills) {
+    if (inTable(f.box) || areaOf(f.box) > pageArea * 0.5) continue;
+    if (centers.some((c) => within(c, f.box, 0))) panels.push(f); else parts.push(f.box);
+  }
+  for (const s of pg.shapes) if (!inTable(s.box) && areaOf(s.box) < pageArea * 0.5) parts.push(s.box);
+  const near = (p, q, d) => p[0] <= q[2] + d && q[0] <= p[2] + d && p[1] <= q[3] + d && q[1] <= p[3] + d;
+  const join = (list, d) => {
+    for (let merged = true; merged;) {
+      merged = false;
+      for (let i = 0; i < list.length; i++) for (let j = list.length - 1; j > i; j--) {
+        if (!near(list[i].box, list[j].box, d)) continue;
+        const p = list[i].box, q = list[j].box;
+        list[i] = { box: [Math.min(p[0], q[0]), Math.min(p[1], q[1]), Math.max(p[2], q[2]), Math.max(p[3], q[3])], n: list[i].n + list[j].n };
+        list.splice(j, 1);
+        merged = true;
+      }
+    }
+    return list;
+  };
+  const groups = join(parts.map((b) => ({ box: [...b], n: 1 })), 6);
+  const used = new Set();
+  const pics = [];
+  for (const g of groups) {
+    const b = g.box, w = b[2] - b[0], hh = b[3] - b[1];
+    if (w < 6 || hh < 6 || w * hh < 80 || (g.n === 1 && w <= 9 && hh <= 9)) continue; // specks and lone bullets
+    const inside = items.filter((it, k) => within(centers[k], b, 0));
+    if (inside.length) {
+      if (g.n < 3 || inside.reduce((s, it) => s + it.str.length, 0) > 40) continue;
+      inside.forEach((it) => used.add(it));
+    }
+    pics.push({ box: [...b], n: g.n });
+  }
+  for (const im of pg.images) if (!im.full) pics.push({ box: [...im.box], n: 1 });
+  return { pics: join(pics, 2).map((p) => p.box), used, panels };
+}
+
 function layoutPage(pg) {
-  const lines = toLines(pg.items);
-  // A dot just left of a line, at its middle, is the line's bullet.
-  for (const l of lines) {
-    const dot = pg.dots.find((d) => d[2] <= l.x0 && l.x0 - d[2] < l.size * 2 && Math.abs((d[1] + d[3]) / 2 - (l.y - l.size * 0.33)) < l.size * 0.3);
-    if (!dot) continue;
-    const sg = l.segs[0];
-    sg.runs.unshift({ ...sg.runs[0], text: '• ', link: null });
-    sg.x0 = l.x0 = dot[0];
+  // A picture filling the page behind real text is its background; behind
+  // only an OCR layer it is a scan, and the recognized text is what counts.
+  const full = pg.images.find((im) => im.full);
+  pg.background = full && pg.items.some((it) => !it.hidden) ? full : null;
+  const tables = gridTables(pg, pg.items);
+  const taken = new Set(tables.flatMap((t) => t.cellList.flatMap((c) => c.items)));
+  let items = pg.items.filter((it) => !taken.has(it));
+  const { pics, used, panels } = pictures(pg, items, tables);
+  items = items.filter((it) => !used.has(it));
+  pg.panels = panels;
+  pg.flow = layoutRegion([
+    ...items.map(textEl),
+    ...pics.map((b) => ({ kind: 'image', x0: b[0], top: b[1], x1: b[2], bottom: b[3] })),
+    ...tables.map((t) => ({ kind: 'table', t, x0: t.x0, top: t.top, x1: t.x1, bottom: t.bottom })),
+  ], pg, 0);
+  pg.blocks = flatBlocks(pg.flow);
+}
+
+// Lays out a part of the page. Pieces side by side with a clear gap between
+// them over several lines (a logo beside an address, two columns) become
+// columns, each laid out on its own; when their lines line up row by row
+// they are a table instead. Everything else flows top to bottom. `width` is
+// how wide the space for it is in the document.
+function layoutRegion(els, pg, depth, width = 0) {
+  if (!els.length) return [];
+  const sorted = els.slice().sort((a, b) => a.top - b.top || a.x0 - b.x0);
+  width ||= Math.max(...els.map((e) => e.x1)) - Math.min(...els.map((e) => e.x0));
+  const bands = [];
+  for (const e of sorted) {
+    const b = bands[bands.length - 1];
+    if (b && e.top < b.bottom - 0.5) { b.els.push(e); b.bottom = Math.max(b.bottom, e.bottom); } else bands.push({ top: e.top, bottom: e.bottom, els: [e] });
   }
-  const gaps = [];
-  for (let k = 1; k < lines.length; k++) {
-    const d = lines[k].y - lines[k - 1].y;
-    if (Math.abs(lines[k].size - lines[k - 1].size) < 0.6 && d > 0 && d < lines[k].size * 2.5) gaps.push(d);
+  const body = median(sorted.filter((e) => e.kind === 'text').map((e) => e.size)) || 11;
+  const G = Math.max(12, body * 1.4);
+  const gaps = (band) => {
+    const occ = [];
+    for (const [a, b] of band.els.map((e) => [e.x0, e.x1]).sort((p, q) => p[0] - q[0])) {
+      const c = occ[occ.length - 1];
+      if (c && a <= c[1]) c[1] = Math.max(c[1], b); else occ.push([a, b]);
+    }
+    const out = [];
+    for (let k = 1; k < occ.length; k++) if (occ[k][0] - occ[k - 1][1] >= G) out.push([occ[k - 1][1], occ[k][0]]);
+    return out;
+  };
+  // A gutter narrowed to what `band` leaves free; null once something crosses it.
+  const narrow = (gu, band) => {
+    let [lo, hi] = gu;
+    for (const e of band.els) {
+      if (e.x1 <= lo || e.x0 >= hi) continue;
+      if (e.x0 - lo >= hi - e.x1) hi = Math.min(hi, e.x0); else lo = Math.max(lo, e.x1);
+      if (hi - lo < G * 0.6) return null;
+    }
+    return [lo, hi];
+  };
+  const out = [];
+  let flow = [];
+  const flush = () => { if (flow.length) out.push(...flowBlocks(flow, pg, width)); flow = []; };
+  for (let i = 0; i < bands.length;) {
+    let gs = depth < 2 ? gaps(bands[i]) : [];
+    if (!gs.length) { flow.push(...bands[i].els); i++; continue; }
+    let j = i + 1, bottom = bands[i].bottom;
+    while (j < bands.length) {
+      // A line on one side only carries on the columns when it follows
+      // closely (a column running longer); after a gap it starts something new.
+      const gap = bands[j].top - bottom;
+      if (gap >= body * 2.2 || (gap >= body * 0.6 && !gaps(bands[j]).length)) break;
+      const keep = gs.map((gu) => narrow(gu, bands[j])).filter(Boolean);
+      if (!keep.length) break;
+      gs = keep;
+      bottom = Math.max(bottom, bands[j].bottom);
+      j++;
+    }
+    const part = bands.slice(i, j).flatMap((b) => b.els);
+    // One line of text with a wide gap is a label and its value: the line's own segments handle it.
+    if (j - i === 1 && part.every((e) => e.kind === 'text')) { flow.push(...part); i = j; continue; }
+    flush();
+    out.push(splitColumns(part, gs, pg, depth));
+    i = j;
   }
-  // Line spacing; capped, because a page of one-line paragraphs only shows paragraph gaps.
-  const lead = Math.min(median(gaps) || 14, median(lines.map((l) => l.size)) * 1.5);
+  flush();
+  return out.sort((a, b) => a.top - b.top);
+}
+
+function splitColumns(els, gutters, pg, depth) {
+  const x0 = Math.min(...els.map((e) => e.x0)), x1 = Math.max(...els.map((e) => e.x1));
+  const top = Math.min(...els.map((e) => e.top)), bottom = Math.max(...els.map((e) => e.bottom));
+  if (els.every((e) => e.kind === 'text')) {
+    const lines = toLines(els.map((e) => e.it));
+    const t = lines.length >= 2 && tableAt(lines, 0);
+    if (t && t.end === lines.length) return { ...t, aligned: true };
+  }
+  const edges = [x0, ...gutters.map((g) => (g[0] + g[1]) / 2).sort((a, b) => a - b), x1];
+  const cols = edges.slice(0, -1).map((a, k) => ({ x0: a, x1: edges[k + 1], els: [] }));
+  for (const e of els) {
+    const cx = (e.x0 + e.x1) / 2;
+    (cols.find((c) => cx < c.x1) || cols[cols.length - 1]).els.push(e);
+  }
+  return { type: 'cols', x0, x1, top, bottom, cols: cols.filter((c) => c.els.length).map((c) => ({ x0: c.x0, x1: c.x1, blocks: layoutRegion(c.els, pg, depth + 1, c.x1 - c.x0) })) };
+}
+
+// Text, pictures and tables in one column, top to bottom: lines become
+// paragraphs, lists and tables of lined-up text.
+function flowBlocks(els, pg, room = 0) {
   const blocks = [];
-  for (let i = 0; i < lines.length;) {
-    const t = tableAt(lines, i);
-    if (t) { blocks.push(t); i = t.end; continue; }
-    const b = blocks[blocks.length - 1];
-    if (b?.type === 'text' && continues(b, lines[i], lead)) b.lines.push(lines[i]);
-    else blocks.push(textBlock(lines[i]));
-    i++;
+  const items = els.filter((e) => e.kind === 'text').map((e) => e.it);
+  if (items.length) {
+    const lines = toLines(items);
+    // A dot just left of a line, at its middle, is the line's bullet.
+    for (const l of lines) {
+      const dot = pg.dots.find((d) => d[2] <= l.x0 && l.x0 - d[2] < l.size * 2 && Math.abs((d[1] + d[3]) / 2 - (l.y - l.size * 0.33)) < l.size * 0.3);
+      if (!dot) continue;
+      const sg = l.segs[0];
+      sg.runs.unshift({ ...sg.runs[0], text: '• ', link: null });
+      sg.x0 = l.x0 = dot[0];
+    }
+    const gaps = [];
+    for (let k = 1; k < lines.length; k++) {
+      const d = lines[k].y - lines[k - 1].y;
+      if (Math.abs(lines[k].size - lines[k - 1].size) < 0.6 && d > 0 && d < lines[k].size * 2.5) gaps.push(d);
+    }
+    // Line spacing; capped, because a page of one-line paragraphs only shows paragraph gaps.
+    const lead = Math.min(median(gaps) || 14, median(lines.map((l) => l.size)) * 1.5);
+    const width = room || Math.max(...lines.map((l) => l.x1)) - Math.min(...lines.map((l) => l.x0));
+    const start = blocks.length;
+    for (let i = 0; i < lines.length;) {
+      const t = tableAt(lines, i);
+      if (t) { blocks.push({ ...t, aligned: true }); i = t.end; continue; }
+      const b = blocks[blocks.length - 1];
+      const go = b?.type === 'text' && continues(b, lines[i], lead, width);
+      if (go) { lines[i].br = go === 'br'; b.lines.push(lines[i]); } else blocks.push(textBlock(lines[i]));
+      i++;
+    }
+    const texts = blocks.slice(start).filter((b) => b.type === 'text');
+    for (const b of texts) {
+      b.x0 = Math.min(...b.lines.map((l) => l.x0));
+      b.x1 = Math.max(...b.lines.map((l) => l.x1));
+      b.top = b.lines[0].top;
+      b.bottom = b.lines[b.lines.length - 1].bottom;
+      const mid = [(b.x0 + b.x1) / 2, (b.top + b.bottom) / 2];
+      b.shade = (pg.panels || []).filter((f) => within(mid, f.box, 1)).sort((p, q) => areaOf(p.box) - areaOf(q.box))[0]?.color || null;
+    }
+    // How deep a list item sits, from how far its marker is indented.
+    const xs = [...new Set(texts.filter((b) => b.list).map((b) => Math.round(b.list.x / 4)))].sort((a, b) => a - b);
+    for (const b of texts) if (b.list) b.list.level = Math.min(2, xs.indexOf(Math.round(b.list.x / 4)));
   }
-  for (const b of blocks) {
-    if (b.type !== 'text') continue;
-    b.x0 = Math.min(...b.lines.map((l) => l.x0));
-    b.x1 = Math.max(...b.lines.map((l) => l.x1));
-    b.top = b.lines[0].top;
-    b.bottom = b.lines[b.lines.length - 1].bottom;
+  for (const e of els) {
+    if (e.kind === 'image') blocks.push({ type: 'image', x0: e.x0, x1: e.x1, top: e.top, bottom: e.bottom });
+    else if (e.kind === 'table') blocks.push(e.t);
   }
-  // How deep a list item sits, from how far its marker is indented.
-  const xs = [...new Set(blocks.filter((b) => b.list).map((b) => Math.round(b.list.x / 4)))].sort((a, b) => a - b);
-  for (const b of blocks) if (b.list) b.list.level = Math.min(2, xs.indexOf(Math.round(b.list.x / 4)));
-  // A picture filling the page behind text is a scan's background: the text is what counts.
-  for (const im of pg.images) {
-    if (im.full && pg.items.length) continue;
-    const [x0, top, x1, bottom] = im.box;
-    blocks.push({ type: 'image', x0, x1, top, bottom });
-  }
-  blocks.sort((a, b) => a.top - b.top);
-  pg.blocks = blocks;
+  return blocks.sort((a, b) => a.top - b.top);
 }
 
 // Body text size is the size most characters have; bigger short blocks are
@@ -472,7 +841,7 @@ const pdfToWord = {
   id: 'pdf-to-word', keywords: 'docx doc word convert editable office microsoft', title: 'PDF to Word', icon: 'toWord', color: '#2563eb', cat: 'convert',
   action: 'Convert to Word', busyText: 'Converting…',
   desc: 'Turn a PDF into an editable Word document.',
-  long: 'Rebuilds paragraphs, headings, lists, tables and pictures as an editable .docx. Complex layouts (several columns, text over pictures) come out simpler than the PDF.',
+  long: 'Rebuilds paragraphs, headings, lists, tables with their borders and shading, logos, pictures and filled-in form fields as an editable .docx. Text side by side, like a logo beside an address or two columns, stays side by side.',
   setup(ctx) {
     ctx.state = { mode: 'text' };
     ctx.main.append(fileHero(ctx.items[0]));
@@ -553,46 +922,127 @@ async function wordSection(D, doc, i, pg) {
       children: [new D.Paragraph({ children: [new D.ImageRun({ type: 'jpg', data, transformation: { width: px(W * k), height: px(H * k) } })] })],
     };
   }
-  const bs = pg.blocks;
+  const bs = pg.flow;
   const left = clamp(Math.min(...bs.map((b) => b.x0)), 18, 108);
   const right = clamp(W - Math.max(...bs.map((b) => b.x1)), 18, 108);
   const top = clamp(Math.min(...bs.map((b) => b.top)), 18, 108);
-  const bottom = clamp(H - Math.max(...bs.map((b) => b.bottom)), 18, 72);
-  const pics = await cropAreas(doc, i, bs.filter((b) => b.type === 'image'));
-  const children = [];
-  let prev = top;
-  for (const b of bs) {
-    const before = tw(clamp(b.top - prev, 0, 72));
-    prev = Math.max(prev, b.bottom);
-    if (b.type === 'image') {
-      const pic = pics.shift();
-      children.push(new D.Paragraph({
-        spacing: { before, after: 0 }, indent: { left: tw(Math.max(0, b.x0 - left)) },
-        children: [new D.ImageRun({ type: pic.type, data: pic.bytes, transformation: { width: px(b.x1 - b.x0), height: px(b.bottom - b.top) } })],
-      }));
-    } else if (b.type === 'table') {
-      if (before > 40) children.push(new D.Paragraph({ spacing: { before: 0, after: 0, line: before, lineRule: D.LineRuleType.EXACT }, children: [] }));
-      children.push(wordTable(D, b, left));
-    } else {
-      children.push(wordParagraph(D, b, { left, right: W - right, before }));
-    }
+  // Some slack at the bottom: Word sets lines a little taller than the PDF did, and a page that overflows makes an extra page.
+  const bottom = clamp(H - Math.max(...bs.map((b) => b.bottom)) - 24, 14, 54);
+  // Pictures anywhere on the page, also inside columns.
+  const imgs = [];
+  const walk = (list) => list.forEach((b) => (b.type === 'image' ? imgs.push(b) : b.type === 'cols' && b.cols.forEach((c) => walk(c.blocks))));
+  walk(bs);
+  const crops = await cropAreas(doc, i, imgs);
+  imgs.forEach((b, k) => (b.pic = crops[k]));
+  const children = wordBlocks(D, bs, { left, right: W - right, top });
+  const bg = pg.background && await backgroundJpeg(doc, i, pg.background);
+  if (bg) {
+    // The page's background picture, behind the text where it was on the page.
+    const [x0, y0, x1, y1] = pg.background.box;
+    const emu = (pt) => Math.round(pt * 12700);
+    children.unshift(new D.Paragraph({
+      spacing: { before: 0, after: 0, line: 20, lineRule: D.LineRuleType.EXACT },
+      children: [new D.ImageRun({
+        type: 'jpg', data: bg, transformation: { width: px(x1 - x0), height: px(y1 - y0) },
+        floating: { horizontalPosition: { relative: D.HorizontalPositionRelativeFrom.PAGE, offset: emu(x0) }, verticalPosition: { relative: D.VerticalPositionRelativeFrom.PAGE, offset: emu(y0) }, behindDocument: true },
+      })],
+    }));
   }
-  // Word wants a paragraph after a table that ends a section.
-  if (bs[bs.length - 1]?.type === 'table') children.push(new D.Paragraph({ children: [] }));
   return { properties: { page: { size, margin: { top: tw(top), right: tw(right), bottom: tw(bottom), left: tw(left) } } }, children };
 }
 
-function wordRuns(D, runs) {
+// The page's full-size background image itself, without the text drawn on
+// it (a render of the page would have the text twice). Null if pdf.js
+// doesn't hand it over, or it is turned.
+async function backgroundJpeg(doc, i, bg) {
+  const { src, m } = bg;
+  if (!src || !m || Math.abs(m[1]) > 0.01 || Math.abs(m[2]) > 0.01) return null;
+  const page = await doc.js.getPage(i + 1);
+  let img = src;
+  if (typeof src === 'string') {
+    const objs = src.startsWith('g_') ? page.commonObjs : page.objs;
+    img = await Promise.race([new Promise((res) => { try { objs.get(src, res); } catch { res(null); } }), new Promise((res) => setTimeout(() => res(null), 3000))]);
+  }
+  if (!img?.width || !img?.height) return null;
+  let c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  const x = c.getContext('2d');
+  if (img.bitmap) x.drawImage(img.bitmap, 0, 0);
+  else if (img.data) {
+    const n = img.width * img.height, d = img.data, rgba = new Uint8ClampedArray(n * 4);
+    if (img.kind === 3) rgba.set(d.subarray(0, n * 4));
+    else if (img.kind === 2) for (let p = 0; p < n; p++) { rgba[p * 4] = d[p * 3]; rgba[p * 4 + 1] = d[p * 3 + 1]; rgba[p * 4 + 2] = d[p * 3 + 2]; rgba[p * 4 + 3] = 255; }
+    else if (img.kind === 1) {
+      const row = (img.width + 7) >> 3;
+      for (let yy = 0; yy < img.height; yy++) for (let xx = 0; xx < img.width; xx++) {
+        const v = (d[yy * row + (xx >> 3)] >> (7 - (xx & 7))) & 1 ? 255 : 0, p = (yy * img.width + xx) * 4;
+        rgba[p] = rgba[p + 1] = rgba[p + 2] = v; rgba[p + 3] = 255;
+      }
+    } else return null;
+    x.putImageData(new ImageData(rgba, img.width, img.height), 0, 0);
+  } else return null;
+  // In view space an upright picture has m[0] > 0 and m[3] < 0; otherwise it is mirrored.
+  const k = Math.min(1, 2400 / Math.max(c.width, c.height));
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(c.width * k)); out.height = Math.max(1, Math.round(c.height * k));
+  const o = out.getContext('2d');
+  o.fillStyle = '#fff';
+  o.fillRect(0, 0, out.width, out.height);
+  o.translate(m[0] < 0 ? out.width : 0, m[3] > 0 ? out.height : 0);
+  o.scale(m[0] < 0 ? -k : k, m[3] > 0 ? -k : k);
+  o.drawImage(c, 0, 0);
+  c.width = c.height = 0;
+  const blob = await new Promise((r) => out.toBlob(r, 'image/jpeg', 0.85));
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+}
+
+const NONE = (D) => ({ style: D.BorderStyle.NONE, size: 0, color: 'auto' });
+const noBorders = (D) => ({ top: NONE(D), bottom: NONE(D), left: NONE(D), right: NONE(D), insideHorizontal: NONE(D), insideVertical: NONE(D) });
+const spacer = (D, h) => new D.Paragraph({ spacing: { before: 0, after: 0, line: Math.max(20, h), lineRule: D.LineRuleType.EXACT }, children: [] });
+
+// Blocks as Word paragraphs and tables, between `left` and `right` (points
+// on the page), starting at `top`. `shade` is the colour behind them.
+function wordBlocks(D, blocks, { left, right, top, shade = null, maxGap = 72 }) {
+  const out = [];
+  let prev = top;
+  for (const b of blocks) {
+    const before = tw(clamp(b.top - prev, 0, maxGap));
+    prev = Math.max(prev, b.bottom);
+    if (b.type === 'image') {
+      if (!b.pic) continue;
+      const w = b.x1 - b.x0, k = Math.min(1, (right - left) / Math.max(1, w));
+      out.push(new D.Paragraph({
+        spacing: { before, after: 0 }, indent: { left: tw(clamp(b.x0 - left, 0, Math.max(0, right - left - w * k))) },
+        children: [new D.ImageRun({ type: b.pic.type, data: b.pic.bytes, transformation: { width: px(w * k), height: px((b.bottom - b.top) * k) } })],
+      }));
+    } else if (b.type === 'text') {
+      out.push(wordParagraph(D, b, { left, right, before, shade }));
+    } else {
+      // The gap above a table is an empty paragraph that tall; two tables in a row need one between them too, or Word joins them.
+      if (before > 40 || out[out.length - 1] instanceof D.Table) out.push(spacer(D, before));
+      out.push(b.type === 'cols' ? colsTable(D, b, left) : b.ruled ? ruledTable(D, b, left) : wordTable(D, b, left, shade));
+    }
+  }
+  // Word needs a paragraph after a table that ends a section or a cell, and every cell needs one.
+  if (!out.length || out[out.length - 1] instanceof D.Table) out.push(spacer(D, 20));
+  return out;
+}
+
+const lum = (c) => { const n = parseInt(c.slice(1), 16); return ((n >> 16) * 0.3 + ((n >> 8) & 255) * 0.59 + (n & 255) * 0.11) / 255; };
+
+function wordRuns(D, runs, shade = null) {
   const out = [];
   for (let k = 0; k < runs.length;) {
     const link = runs[k].link;
     const group = [];
     while (k < runs.length && runs[k].link === link) group.push(runs[k++]);
-    const made = group.map((r) => new D.TextRun({
+    const made = group.map((r) => (r.br ? new D.TextRun({ break: 1 }) : new D.TextRun({
       text: r.text, bold: r.bold, italics: r.italic, size: Math.max(2, Math.round(r.size * 2)), font: r.font,
-      // Always set: heading styles would otherwise paint black text blue.
-      color: link && r.color === '#000000' ? '0563C1' : r.color.slice(1), underline: link ? {} : undefined,
-    }));
+      // Always set: heading styles would otherwise paint black text blue. White
+      // text with nothing behind it in the document would vanish: it goes black.
+      color: link && r.color === '#000000' ? '0563C1' : !shade && lum(r.color) > 0.85 ? '000000' : r.color.slice(1),
+      underline: link ? {} : undefined,
+    })));
     out.push(...(link ? [new D.ExternalHyperlink({ link, children: made })] : made));
   }
   return out;
@@ -603,14 +1053,16 @@ function alignOf(b, left, right) {
   const mid = (left + right) / 2;
   if (L.every((l) => Math.abs((l.x0 + l.x1) / 2 - mid) < 4) && L[0].x0 > left + 18) return 'center';
   if (L.every((l) => Math.abs(l.x1 - right) < 4) && L[0].x0 > left + 36) return 'right';
-  if (L.length >= 3 && L.slice(0, -1).every((l) => Math.abs(l.x1 - b.x1) < 1.5) && L[L.length - 1].x1 < b.x1 - 6) return 'both';
+  if (L.length >= 3 && L.slice(0, -1).every((l) => Math.abs(l.x1 - b.x1) < 1.5) && L[L.length - 1].x1 < b.x1 - 6 && !L.some((l) => l.br)) return 'both';
   return 'left';
 }
 
-function wordParagraph(D, b, { left, right, before }) {
-  let runs = blockRuns(b.lines);
+function wordParagraph(D, b, { left, right, before, shade = null }) {
+  let runs = blockRuns(b.lines, true);
   const L = b.lines;
+  const bg = b.shade || shade;
   const opts = { spacing: { before, after: 0 } };
+  if (b.shade) opts.shading = { fill: b.shade.slice(1), type: D.ShadingType.CLEAR, color: 'auto' };
   if (L.length > 1) {
     const lead = (L[L.length - 1].y - L[0].y) / (L.length - 1);
     opts.spacing.line = clamp(Math.round((lead / (b.size * 1.15)) * 240), 240, 720);
@@ -632,32 +1084,85 @@ function wordParagraph(D, b, { left, right, before }) {
     const ind = rest - left, first = L[0].x0 - rest;
     if (ind > 3 || Math.abs(first) > 3) opts.indent = { left: tw(Math.max(0, ind)), ...(first > 3 ? { firstLine: tw(first) } : first < -3 ? { hanging: tw(-first) } : {}) };
   }
-  return new D.Paragraph({ ...opts, children: wordRuns(D, runs) });
+  return new D.Paragraph({ ...opts, children: wordRuns(D, runs, bg) });
 }
 
 const numericCols = (t) => t.cols.map((_, k) => {
-  const vals = t.cells.slice(1).map((r) => runsText(r[k])).filter(Boolean);
+  const vals = t.cells.slice(1).map((r) => runsText(r[k] || [])).filter(Boolean);
   return vals.length > 0 && vals.every((v) => toNumber(v));
 });
 
-function wordTable(D, t, left) {
+// A table of lined-up text, with no lines drawn: no borders either.
+function wordTable(D, t, left, shade = null) {
   const widths = t.cols.map((c, k) => {
     const next = t.cols[k + 1];
-    return tw((next ? next.x0 - 3 : c.x1 + 6) - (k ? c.x0 - 3 : t.x0 - 6));
+    return tw((next ? next.x0 - 3 : c.x1 + 9) - (k ? c.x0 - 3 : t.x0 - 3));
   });
   const nums = numericCols(t);
   return new D.Table({
     columnWidths: widths,
     width: { size: widths.reduce((s, w) => s + w, 0), type: D.WidthType.DXA },
     layout: D.TableLayoutType.FIXED,
-    indent: { size: tw(Math.max(0, t.x0 - left - 6)), type: D.WidthType.DXA },
+    indent: { size: tw(Math.max(0, t.x0 - left - 3)), type: D.WidthType.DXA },
+    borders: noBorders(D),
     rows: t.cells.map((row) => new D.TableRow({
       children: row.map((runs, k) => new D.TableCell({
         width: { size: widths[k], type: D.WidthType.DXA },
-        margins: { top: 40, bottom: 40, left: 100, right: 100 },
-        children: [new D.Paragraph({ alignment: nums[k] ? D.AlignmentType.RIGHT : D.AlignmentType.LEFT, children: wordRuns(D, runs) })],
+        margins: { top: 0, bottom: 0, left: 60, right: 60 },
+        children: [new D.Paragraph({ alignment: nums[k] ? D.AlignmentType.RIGHT : D.AlignmentType.LEFT, children: wordRuns(D, runs, shade) })],
       })),
     })),
+  });
+}
+
+// A table drawn with lines: the same grid, merged cells, shading and the
+// borders that were drawn.
+function ruledTable(D, t, left) {
+  const widths = t.xs.slice(0, -1).map((x, c) => tw(t.xs[c + 1] - x));
+  const sz = clamp(Math.round(t.width * 8), 2, 48); // eighths of a point
+  const edge = (on) => (on ? { style: D.BorderStyle.SINGLE, size: sz, color: t.color.slice(1) } : NONE(D));
+  const pad = 4;
+  const rows = [];
+  for (let r = 0; r < t.ys.length - 1; r++) {
+    rows.push(new D.TableRow({
+      height: { value: tw(t.ys[r + 1] - t.ys[r]), rule: D.HeightRule.ATLEAST },
+      children: t.cellList.filter((c) => c.r0 === r).map((c) => new D.TableCell({
+        width: { size: widths.slice(c.c0, c.c1 + 1).reduce((s, w) => s + w, 0), type: D.WidthType.DXA },
+        columnSpan: c.c1 - c.c0 + 1, rowSpan: c.r1 - c.r0 + 1,
+        margins: { top: tw(1), bottom: tw(1), left: tw(pad), right: tw(pad) },
+        shading: c.fill ? { fill: c.fill.slice(1), type: D.ShadingType.CLEAR, color: 'auto' } : undefined,
+        borders: { top: edge(c.edges.top), bottom: edge(c.edges.bottom), left: edge(c.edges.left), right: edge(c.edges.right) },
+        children: wordBlocks(D, c.blocks, { left: c.box[0] + pad, right: c.box[2] - pad, top: c.box[1] + 1, shade: c.fill }),
+      })),
+    }));
+  }
+  return new D.Table({
+    columnWidths: widths,
+    width: { size: widths.reduce((s, w) => s + w, 0), type: D.WidthType.DXA },
+    layout: D.TableLayoutType.FIXED,
+    indent: { size: tw(Math.max(0, t.x0 - left)), type: D.WidthType.DXA },
+    borders: noBorders(D),
+    rows,
+  });
+}
+
+// Pieces side by side (a logo beside an address, columns of text): a table
+// without borders, one cell per column.
+function colsTable(D, b, left) {
+  const widths = b.cols.map((c) => tw(c.x1 - c.x0));
+  return new D.Table({
+    columnWidths: widths,
+    width: { size: widths.reduce((s, w) => s + w, 0), type: D.WidthType.DXA },
+    layout: D.TableLayoutType.FIXED,
+    indent: { size: tw(Math.max(0, b.x0 - left)), type: D.WidthType.DXA },
+    borders: noBorders(D),
+    rows: [new D.TableRow({
+      children: b.cols.map((c, k) => new D.TableCell({
+        width: { size: widths[k], type: D.WidthType.DXA },
+        margins: { top: 0, bottom: 0, left: 0, right: 0 },
+        children: wordBlocks(D, c.blocks, { left: c.x0, right: c.x1, top: b.top, maxGap: 600 }),
+      })),
+    })],
   });
 }
 
