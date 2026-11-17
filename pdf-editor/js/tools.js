@@ -1,7 +1,7 @@
 // Every tool: what it shows while you set it up, and what it does when you press its button.
 import {
   h, icon, busy, toast, tick, PDFDocument, StandardFonts, rgb, degrees, loadLib, renderPage, fmtSize, baseName,
-  parseRanges, pageFrame, boxAnchor, fontCanDraw, textAsPng, hexToRgb, imageForPdf, sortable, uid, pickFiles,
+  parseRanges, pageFrame, boxAnchor, fontCanDraw, textAsPng, hexToRgb, imageForPdf, imageDoc, sortable, uid, pickFiles,
 } from './core.js';
 import { editorTool } from './editor.js';
 import { parseOps, readPage } from './content.js';
@@ -19,10 +19,23 @@ export const CATEGORIES = [['organize', 'Organize'], ['optimize', 'Optimize'], [
 /* ---------- MERGE ---------- */
 
 const merge = {
-  id: 'merge', keywords: 'combine join', title: 'Merge PDF', icon: 'merge', color: '#3b82f6', cat: 'organize', multiple: true, action: 'Merge PDF',
-  desc: 'Join several PDFs into one, in the order you want.',
-  long: 'Put PDFs together in the order you want. Drag the cards to change the order.',
+  id: 'merge', keywords: 'combine join image photo jpg png', title: 'Merge PDF', icon: 'merge', color: '#3b82f6', cat: 'organize', multiple: true, action: 'Merge PDF',
+  images: 'a4', // also takes pictures, each one a page (see imageDoc)
+  desc: 'Join several PDFs and images into one PDF, in the order you want.',
+  long: 'Put PDFs and pictures (JPG, PNG, WebP) together in the order you want. Each picture becomes a page. Drag the cards to change the order.',
   setup(ctx) {
+    const s = ctx.state = { size: 'a4' };
+    // Pictures are remade as pages of the other size, so the previews show what you get.
+    const resize = async (v) => {
+      s.size = v;
+      busy('Updating the pictures…');
+      try {
+        for (const [k, d] of ctx.items.entries()) if (d.image) ctx.items[k] = Object.assign(await imageDoc(d.image, v), { uid: d.uid });
+      } catch (err) { toast(err.message, 'bad'); } finally { busy(false); }
+      draw();
+    };
+    const sizeField = h('div', {}, field('Picture pages', segmented([['a4', 'A4 page'], ['fit', 'Picture size']], s.size, resize)),
+      h('p', { class: 'muted small' }, 'A4 matches most documents. Picture size makes the page the shape of the picture.'));
     const list = h('div', { class: 'cards' });
     const draw = () => {
       list.replaceChildren(...ctx.items.map((d) => {
@@ -32,18 +45,26 @@ const merge = {
         ]);
         card.dataset.id = d.uid ||= uid();
         return card;
-      }), h('button', { class: 'card card--add', onclick: add }, icon('plus'), 'Add PDF'));
+      }), h('button', { class: 'card card--add', onclick: add }, icon('plus'), 'Add PDF or image'));
       ctx.action.disabled = ctx.items.length < 2;
-      hint.textContent = ctx.items.length < 2 ? 'Add at least one more PDF.' : `${ctx.items.length} files, ${ctx.items.reduce((s, d) => s + d.pages, 0)} pages in total.`;
+      hint.textContent = ctx.items.length < 2 ? 'Add at least one more PDF or image.' : `${ctx.items.length} files, ${ctx.items.reduce((n, d) => n + d.pages, 0)} pages in total.`;
+      sizeField.hidden = !ctx.items.some((d) => d.image);
     };
-    const add = async () => { ctx.items.push(...(await ctx.addMore())); draw(); };
-    ctx.onDropMore = (more) => { ctx.items.push(...more); draw(); };
+    // Pictures added later come in at the size picked.
+    const sized = async (more) => {
+      if (s.size === 'a4') return more;
+      for (const [k, d] of more.entries()) if (d.image) more[k] = await imageDoc(d.image, s.size);
+      return more;
+    };
+    const add = async () => { ctx.items.push(...(await sized(await ctx.addMore()))); draw(); };
+    ctx.onDropMore = async (more) => { ctx.items.push(...(await sized(more))); draw(); };
     sortable(list, (ids) => { ctx.items.sort((a, b) => ids.indexOf(a.uid) - ids.indexOf(b.uid)); });
     const hint = h('p', { class: 'muted' });
     ctx.main.append(list);
     ctx.side.append(
       h('p', {}, 'Files are joined from left to right. Drag a card to move it.'),
       h('button', { class: 'btn btn--ghost btn--block', onclick: () => { ctx.items.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })); draw(); } }, 'Sort by name'),
+      sizeField,
       hint);
     draw();
   },
@@ -55,7 +76,11 @@ const merge = {
       const src = await loadLib(d);
       (await out.copyPages(src, src.getPageIndices())).forEach((p) => out.addPage(p));
     }
-    return { files: [pdfOut('merged.pdf', await out.save())], title: 'Your PDFs are merged', note: `${ctx.items.length} files, ${out.getPageCount()} pages.` };
+    const pics = ctx.items.filter((d) => d.image).length;
+    return {
+      files: [pdfOut('merged.pdf', await out.save())], title: pics ? 'Your files are merged' : 'Your PDFs are merged',
+      note: `${ctx.items.length} files${pics ? ` (${pics} picture${pics > 1 ? 's' : ''})` : ''}, ${out.getPageCount()} pages.`,
+    };
   },
 };
 

@@ -453,6 +453,29 @@ export async function imageForPdf(file, { maxSide = 0, quality = 0.92, keepAlpha
   return { bytes: new Uint8Array(await blob.arrayBuffer()), png, width, height };
 }
 
+// A picture as a one-page PDF. 'a4' fits it on an A4 page turned to suit
+// it; 'fit' makes the page the picture's shape, as long as an A4 page.
+export async function imagePdfBytes(file, size = 'a4') {
+  const im = await imageForPdf(file, { maxSide: 3000 });
+  const d = await PDFDocument.create();
+  const emb = im.png ? await d.embedPng(im.bytes) : await d.embedJpg(im.bytes);
+  let W, H;
+  if (size === 'fit') { const k = 842 / Math.max(im.width, im.height); W = im.width * k; H = im.height * k; }
+  else [W, H] = im.width > im.height ? [842, 595] : [595, 842];
+  const k = Math.min(W / im.width, H / im.height);
+  const w = im.width * k, hh = im.height * k;
+  d.addPage([W, H]).drawImage(emb, { x: (W - w) / 2, y: (H - hh) / 2, width: w, height: hh });
+  return d.save();
+}
+
+// A picture opened like a PDF (thumbnails, pages, loadLib), still named as
+// the picture; `image` keeps the picture to make it again at another size.
+export async function imageDoc(file, size = 'a4') {
+  const bytes = await imagePdfBytes(file, size === true ? 'a4' : size);
+  const doc = await openPdf(new File([bytes], file.name.replace(/.[^.]+$/, '') + '.pdf', { type: 'application/pdf' }));
+  return Object.assign(doc, { name: file.name, size: file.size, image: file });
+}
+
 function hasAlpha(ctx, w, h) {
   const step = Math.max(1, Math.floor((w * h) / 40000));
   const d = ctx.getImageData(0, 0, w, h).data;

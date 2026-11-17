@@ -1,6 +1,6 @@
 // Pages: home (hero + every tool), the workspace (recent files, favourites)
 // and the shell every tool runs in: pick files -> work -> download.
-import { h, icon, busy, toast, tick, openPdf, isPdf, isImage, pickFiles, download, fmtSize, modal } from './core.js';
+import { h, icon, busy, toast, tick, openPdf, imageDoc, isPdf, isImage, pickFiles, download, fmtSize, modal } from './core.js';
 import { TOOLS, CATEGORIES } from './tools.js';
 import { listDocs, getDoc, deleteDoc, saveDoc, usedBytes, LIMIT, keepCopies, setKeepCopies, favorites, toggleFavorite } from './store.js';
 
@@ -245,10 +245,11 @@ function showTool(tool) {
 
 // tool.accept: 'pdf' (default), 'image', or { accept: '.docx,...', test(file), label: 'Word files' }
 // for other kinds. Only PDFs are opened up front; other files reach the tool as { file, name, size }.
+// A PDF tool with tool.images also takes pictures, each opened as a one-page PDF (see imageDoc).
 const kindOf = (tool) => (typeof tool.accept === 'object' ? 'other' : tool.accept === 'image' ? 'image' : 'pdf');
-const acceptOf = (tool) => ({ image: 'image/*', pdf: 'application/pdf,.pdf', other: tool.accept?.accept })[kindOf(tool)];
-const accepts = (tool, f) => ({ image: isImage, pdf: isPdf, other: (x) => tool.accept.test(x) })[kindOf(tool)](f);
-const labelOf = (tool) => ({ image: 'images', pdf: 'PDF files', other: tool.accept?.label || 'files' })[kindOf(tool)];
+const acceptOf = (tool) => (tool.images ? 'application/pdf,.pdf,image/*,.heic,.heif' : ({ image: 'image/*', pdf: 'application/pdf,.pdf', other: tool.accept?.accept })[kindOf(tool)]);
+const accepts = (tool, f) => (tool.images && isImage(f)) || ({ image: isImage, pdf: isPdf, other: (x) => tool.accept.test(x) })[kindOf(tool)](f);
+const labelOf = (tool) => (tool.images ? 'PDF files or images' : ({ image: 'images', pdf: 'PDF files', other: tool.accept?.label || 'files' })[kindOf(tool)]);
 
 function showDrop(tool, body) {
   const pick = async () => onFiles(await pickFiles({ accept: acceptOf(tool), multiple: !!tool.multiple }));
@@ -263,11 +264,11 @@ function showDrop(tool, body) {
   };
   const kind = kindOf(tool);
   const img = kind === 'image';
-  const what = kind === 'other' ? tool.accept.label : null;
+  const what = kind === 'other' ? tool.accept.label : tool.images ? 'PDF files or images' : null;
   const zone = h('div', { class: 'drop' },
     h('span', { class: 'drop__icon', 'aria-hidden': 'true' }, icon(img ? 'image' : 'upload')),
     h('h2', { class: 'drop__title' }, what ? `Choose ${tool.multiple ? 'your' : 'a'} ${what}` : img ? (tool.multiple ? 'Choose your images' : 'Choose an image') : (tool.multiple ? 'Choose your PDF files' : 'Choose a PDF file')),
-    h('p', { class: 'drop__or' }, img ? 'Drag and drop JPG, PNG or WebP images here, or' : 'Drag and drop here, or'),
+    h('p', { class: 'drop__or' }, img ? 'Drag and drop JPG, PNG or WebP images here, or' : tool.images ? 'Drag and drop PDFs or JPG, PNG and WebP images here, or' : 'Drag and drop here, or'),
     h('button', { class: 'btn btn--solid btn--big', onclick: pick }, icon('plus'), what ? `Select ${what}` : img ? 'Select images' : (tool.multiple ? 'Select PDF files' : 'Select PDF file')),
     // Extra ways in (camera, a web address…): tool.dropExtra(start) returns nodes;
     // start(items) skips straight to the workspace with items the tool made.
@@ -290,7 +291,7 @@ async function openAll(tool, files) {
     busy(files.length > 1 ? `Opening ${i + 1} of ${files.length}…` : 'Opening…');
     await tick();
     try {
-      out.push(await openPdf(f));
+      out.push(tool.images && isImage(f) && !isPdf(f) ? await imageDoc(f, tool.images) : await openPdf(f));
     } catch (err) {
       busy(false);
       if (err.message !== 'cancelled') toast(err.message, 'bad');
