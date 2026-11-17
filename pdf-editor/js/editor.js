@@ -102,6 +102,8 @@ async function setupEditor(ctx, signMode) {
     const mid = pagesEl.scrollTop + pagesEl.clientHeight / 3;
     let cur = 0;
     pageEls.forEach((p, i) => { if (p.offsetTop <= mid) cur = i; });
+    // Scrolled to the end: the last page is the one in view, even if it is too short to reach the top.
+    if (pagesEl.scrollTop > 0 && pagesEl.scrollTop + pagesEl.clientHeight >= pagesEl.scrollHeight - 4) cur = pageEls.length - 1;
     thumbBtns.forEach((b, i) => b.classList.toggle('on', i === cur));
     pageLbl.textContent = `Page ${cur + 1} of ${sizes.length}`;
     if (st.curPage !== cur) { st.curPage = cur; thumbBtns[cur].scrollIntoView({ block: 'nearest' }); }
@@ -261,7 +263,15 @@ async function setupEditor(ctx, signMode) {
       kids.push(h('button', { class: 'btn btn--soft btn--block ed-place', onclick: () => placeCentre() }, icon('plus'),
         st.pending ? (st.pending.kind === 'sig' ? 'Place signature on this page' : 'Place image on this page') : 'Add text on this page'));
     }
-    if (o) kids.push(h('p', { class: 'muted small' }, 'Arrow keys move it (Shift for bigger steps).'),
+    if (o && sizes.length > 1) {
+      const n = copiesOf(o).length;
+      kids.push(h('div', { class: 'ed-copies' },
+        h('span', { class: 'f__label' }, n > 1 ? `On ${n} of ${sizes.length} pages` : 'Other pages'),
+        h('button', { class: 'btn btn--soft btn--block', disabled: o.page + 1 >= sizes.length, onclick: () => copyToNext(o) }, icon('arrow'), 'Copy to next page'),
+        h('button', { class: 'btn btn--soft btn--block', disabled: n >= sizes.length, onclick: () => copyToAll(o) }, icon('pages'), 'Put on every page'),
+        n > 1 && h('button', { class: 'btn btn--soft btn--block danger', onclick: () => removeAll(o) }, icon('trash'), `Delete from all ${n} pages`)));
+    }
+    if (o) kids.push(h('p', { class: 'muted small' }, `Arrow keys move it (Shift for bigger steps). Ctrl+C, then Ctrl+V on another page, copies it.`),
       h('button', { class: 'btn btn--soft btn--block danger', onclick: () => remove(o) }, icon('trash'), 'Delete'));
     props.replaceChildren(...kids);
   }
@@ -561,6 +571,64 @@ async function setupEditor(ctx, signMode) {
     els.delete(o.id);
     select(null);
   }
+
+  // Copies of one thing on several pages share a `group`. A copy keeps its
+  // distance from the nearest edges, so a signature in the bottom right
+  // corner stays there on a page of another size.
+  function copyOnto(o, i) {
+    const from = sizes[o.page], to = sizes[i], w = o.w || 0, hh = o.h || 0;
+    o.group ||= o.id;
+    const c = { ...o, id: uid(), page: i, pts: o.pts?.map((p) => [...p]) };
+    delete c.orig; // a copy of the PDF's own text is new text on the other page
+    c.x = clamp(o.x + w / 2 > from.w / 2 ? to.w - (from.w - o.x) : o.x, 0, Math.max(0, to.w - w));
+    c.y = clamp(o.y + hh / 2 > from.h / 2 ? to.h - (from.h - o.y) : o.y, 0, Math.max(0, to.h - hh));
+    st.objects.push(c);
+    make(c);
+    place(c);
+    return c;
+  }
+  const copiesOf = (o) => (o.group ? st.objects.filter((x) => x.group === o.group) : [o]);
+  function copyToNext(o) {
+    const i = o.page + 1;
+    if (i >= sizes.length) return;
+    snapshot();
+    const c = copyOnto(o, i);
+    pagesEl.scrollTo({ top: pageEls[i].offsetTop - 16, behavior: 'smooth' });
+    select(c.id);
+    toast(`Copied to page ${i + 1}.`);
+  }
+  function copyToAll(o) {
+    const have = new Set(copiesOf(o).map((x) => x.page));
+    const todo = sizes.map((_, i) => i).filter((i) => !have.has(i));
+    if (!todo.length) return toast('It is already on every page.');
+    snapshot();
+    todo.forEach((i) => copyOnto(o, i));
+    drawProps();
+    toast(`Added to ${todo.length} more page${todo.length > 1 ? 's' : ''}.`);
+  }
+  function removeAll(o) {
+    const all = copiesOf(o);
+    snapshot();
+    st.objects = st.objects.filter((x) => !all.includes(x));
+    all.forEach((x) => { els.get(x.id)?.remove(); els.delete(x.id); });
+    select(null);
+    toast(`Deleted from ${all.length} pages.`);
+  }
+  // Ctrl+V: onto the page in view, in the same place (a little lower and to
+  // the right when that page already has it there).
+  function paste() {
+    const o = st.clip;
+    if (!o) return;
+    const i = st.curPage ?? o.page;
+    snapshot();
+    const c = copyOnto(o, i);
+    if (st.objects.some((x) => x !== c && x.page === i && Math.abs(x.x - c.x) < 1 && Math.abs(x.y - c.y) < 1)) {
+      c.x = clamp(c.x + 12, 0, Math.max(0, sizes[i].w - (c.w || 0)));
+      c.y = clamp(c.y + 12, 0, Math.max(0, sizes[i].h - (c.h || 0)));
+      place(c);
+    }
+    select(c.id);
+  }
   function make(o) {
     let el;
     if (o.type === 'text') {
@@ -836,6 +904,8 @@ async function setupEditor(ctx, signMode) {
     const onPage = e.target === document.body || pagesEl.contains(e.target);
     if ((e.key === 'Delete' || e.key === 'Backspace') && sel) { e.preventDefault(); remove(sel); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && sel && !window.getSelection()?.toString()) { sel.group ||= sel.id; st.clip = { ...sel }; toast('Copied. Go to another page and press Ctrl+V.'); }
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && st.clip) { e.preventDefault(); paste(); }
     else if (e.key === 'Escape') { st.pending = null; st.tool = 'select'; select(null); syncTools(); }
     else if (sel && onPage && e.key.startsWith('Arrow')) {
       // Nudge: one undo step per burst of key presses.

@@ -468,6 +468,7 @@ select.field { appearance: auto; }
 .obj.live { pointer-events: none; }
 
 .ed-props { display: flex; flex-direction: column; gap: 18px; }
+.ed-copies { display: flex; flex-direction: column; gap: 8px; }
 .props__title { margin: 0; padding-bottom: 14px; border-bottom: 1px solid var(--line); font-size: 1.02rem; }
 .sigs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .sig { position: relative; }
