@@ -13,6 +13,7 @@ import { SECURITY_MORE } from './more/security.js';
 import { TO_PDF } from './more/to-pdf.js';
 import { FROM_PDF } from './more/from-pdf.js';
 import { SMART } from './more/smart.js';
+import { VIDEO } from './more/video.js';
 
 export const CATEGORIES = [['organize', 'Organize'], ['optimize', 'Optimize'], ['convert', 'Convert'], ['edit', 'Edit'], ['security', 'Security'], ['ai', 'Intelligence'], ['workflows', 'Workflows']];
 
@@ -1033,7 +1034,7 @@ const unlock = {
 // Same order as iLovePDF's menu. Ids not listed go at the end.
 const ORDER = [
   'merge', 'split', 'remove-pages', 'extract-pages', 'organize', 'scan',
-  'compress', 'repair', 'ocr', 'image-to-text',
+  'compress', 'compress-video', 'repair', 'ocr', 'image-to-text',
   'jpg-to-pdf', 'word-to-pdf', 'ppt-to-pdf', 'excel-to-pdf', 'html-to-pdf',
   'pdf-to-jpg', 'pdf-to-word', 'pdf-to-ppt', 'pdf-to-excel', 'pdf-to-pdfa', 'pdf-to-markdown',
   'rotate', 'page-numbers', 'watermark', 'crop', 'edit', 'forms',
@@ -1044,5 +1045,5 @@ const rank = (t) => (ORDER.includes(t.id) ? ORDER.indexOf(t.id) : ORDER.length);
 export const TOOLS = [
   merge, split, organize, rotate, compress, jpgToPdf, pdfToJpg,
   editorTool('edit'), editorTool('sign'), watermark, pageNumbers, protect, unlock,
-  ...ORGANIZE_MORE, ...SECURITY_MORE, ...TO_PDF, ...FROM_PDF, ...SMART,
+  ...ORGANIZE_MORE, ...SECURITY_MORE, ...TO_PDF, ...FROM_PDF, ...SMART, ...VIDEO,
 ].sort((a, b) => rank(a) - rank(b));

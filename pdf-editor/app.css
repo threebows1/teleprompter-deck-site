@@ -332,6 +332,11 @@ select.field { appearance: auto; }
 .hero-file .thumb { max-width: 200px; max-height: 250px; width: auto !important; height: auto; background: #fff; box-shadow: 0 14px 30px -12px rgba(23, 23, 58, .35); border-radius: 3px; }
 .hero-file strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1.04rem; }
 .hero-file span { color: var(--faint); font-size: .86rem; }
+/* Compress video */
+.vid { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+.vid__player { width: 100%; max-width: 640px; max-height: 60vh; border-radius: 16px; background: #000; }
+.vid .card__meta { max-width: 100%; }
+.vid-est { margin: 4px 0 0; padding: 12px 14px; border-radius: 12px; background: var(--stage); line-height: 1.5; }
 
 .file-row { display: flex; align-items: center; gap: 12px; padding: 10px; border-radius: 14px; background: var(--surface-2); }
 .file-row__page { display: grid; place-items: center; width: 44px; height: 54px; flex: none; }
@@ -392,6 +397,7 @@ select.field { appearance: auto; }
 .busy { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(23, 23, 58, .28); backdrop-filter: blur(4px); }
 .busy__box { display: flex; flex-direction: column; align-items: center; gap: 14px; min-width: 230px; padding: 30px 38px; border-radius: 22px; background: #fff; box-shadow: var(--shadow); }
 .busy__box p { margin: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.busy__cancel { margin-top: 4px; }
 .spinner { width: 38px; height: 38px; border-radius: 50%; border: 3px solid var(--primary-soft); border-top-color: var(--primary); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 120; width: max-content; max-width: calc(100% - 32px); padding: 12px 18px; border-radius: 14px; background: #17173a; color: #fff; box-shadow: 0 16px 40px -12px rgba(23, 23, 58, .5); font-size: .92rem; animation: rise .25s ease-out; }

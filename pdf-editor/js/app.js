@@ -385,6 +385,7 @@ const NEXT = {
   'ppt-to-pdf': ['compress', 'merge', 'sign', 'protect'],
   'excel-to-pdf': ['compress', 'merge', 'sign', 'protect'],
   'html-to-pdf': ['compress', 'merge', 'sign', 'protect'],
+  'compress-video': ['compress', 'jpg-to-pdf', 'pdf-to-jpg', 'merge'],
 };
 const FALLBACK = ['compress', 'merge', 'edit', 'sign', 'protect', 'split'];
 
