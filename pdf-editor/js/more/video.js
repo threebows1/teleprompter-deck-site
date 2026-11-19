@@ -1,7 +1,8 @@
-// Compress video: makes a smaller MP4 with the browser's own video encoder
-// (WebCodecs, through mediabunny). Nothing leaves the device.
-import { h, icon, registerIcons, busy, toast, baseName, fmtSize } from '../core.js';
-import { field, segmented, choiceCards, check } from '../ui.js';
+// Compress video & images: a smaller MP4 made with the browser's own video
+// encoder (WebCodecs, through mediabunny), or photos re-saved smaller with a
+// canvas. Nothing leaves the device.
+import { h, icon, registerIcons, busy, toast, baseName, fmtSize, isImage, hasAlpha, uid } from '../core.js';
+import { field, segmented, choiceCards, check, debounce } from '../ui.js';
 
 registerIcons({
   video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/>',
@@ -63,12 +64,7 @@ function plan(info, s) {
   return { width, height, video, estimate: ((video + audio) * info.duration) / 8 };
 }
 
-const compressVideo = {
-  id: 'compress-video', keywords: 'video mp4 mov movie clip reduce shrink size smaller whatsapp email', title: 'Compress video', icon: 'video', color: '#e11d48', cat: 'optimize',
-  accept: { accept: 'video/*,.mp4,.m4v,.mov,.webm,.mkv,.3gp', test: isVideo, label: 'video' },
-  action: 'Compress video', busyText: 'Getting ready…',
-  desc: 'Make a video smaller to send or share.',
-  long: 'Shrink MP4, MOV and WebM videos into a smaller MP4. Pick how small, and a lower resolution for a bigger saving.',
+const videoMode = {
   setup(ctx) {
     const it = ctx.items[0];
     const s = ctx.state = { level: 'medium', res: 'original', mute: false };
@@ -185,6 +181,157 @@ const compressVideo = {
       note: `${fmtSize(before)} → ${fmtSize(bytes.byteLength)} · ${note}`,
     };
   },
+};
+
+/* ---------- images ---------- */
+
+const QUALITY = { small: 0.6, medium: 0.75, high: 0.86 };
+const EXT = { 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/png': 'png' };
+
+// Re-encodes one picture. 'auto' keeps JPG and WebP as they are, and turns
+// PNG (which a browser can only save losslessly) into JPG, or WebP when it
+// has see-through parts. Camera details and location go with the re-encode.
+async function shrinkImage(file, s) {
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch {
+    throw new Error(/\.(heic|heif)$/i.test(file.name) || /hei[cf]/i.test(file.type)
+      ? `“${file.name}” is a HEIC photo, which this browser can’t open. Save it as JPG first.`
+      : `“${file.name}” can’t be read as an image.`);
+  }
+  const k = s.max && Math.max(bmp.width, bmp.height) > s.max ? s.max / Math.max(bmp.width, bmp.height) : 1;
+  const width = Math.max(1, Math.round(bmp.width * k)), height = Math.max(1, Math.round(bmp.height * k));
+  const c = Object.assign(document.createElement('canvas'), { width, height });
+  const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(bmp, 0, 0, width, height);
+  bmp.close?.();
+  let type = s.format === 'jpg' ? 'image/jpeg' : s.format === 'webp' ? 'image/webp' : null;
+  if (!type) {
+    if (/jpe?g/i.test(file.type) || /\.jpe?g$/i.test(file.name)) type = 'image/jpeg';
+    else if (/webp/i.test(file.type)) type = 'image/webp';
+    else type = hasAlpha(g, width, height) ? 'image/webp' : 'image/jpeg';
+  }
+  if (type === 'image/jpeg') { g.globalCompositeOperation = 'destination-over'; g.fillStyle = '#fff'; g.fillRect(0, 0, width, height); }
+  let blob = await new Promise((r) => c.toBlob(r, type, QUALITY[s.level]));
+  c.width = c.height = 0;
+  if (!blob) throw new Error(`“${file.name}” is too large for this device to compress.`);
+  // Safari can't write WebP and quietly hands back PNG: say what it really is.
+  type = blob.type || type;
+  // Bigger than it was, at the same size and kind: the original is the better file.
+  const same = k === 1 && file.type === type;
+  if (same && blob.size >= file.size) return { blob: file, type, width, height, kept: true };
+  return { blob, type, width, height };
+}
+
+const imageMode = {
+  setup(ctx) {
+    const s = ctx.state = { level: 'medium', max: 0, format: 'auto' };
+    const urls = new Map();
+    const total = h('p', { class: 'vid-est' }, 'Working out the new sizes…');
+    let gen = 0;
+    const key = () => `${s.level}|${s.max}|${s.format}`;
+    const list = h('div', { class: 'cards' });
+    const sizeLine = (it) => {
+      if (it.err) return h('span', { class: 'vid-bad' }, it.err);
+      if (!it.out || it.outKey !== key()) return h('span', {}, `${fmtSize(it.size)} → …`);
+      const pct = Math.round((1 - it.out.blob.size / it.size) * 100);
+      return h('span', { class: 'vid-size' }, `${fmtSize(it.size)} → `, h('b', {}, fmtSize(it.out.blob.size)), pct > 0 ? ` (−${pct}%)` : ' (no saving)');
+    };
+    const draw = () => {
+      list.replaceChildren(...ctx.items.map((it) => {
+        it.uid ||= uid();
+        if (!urls.has(it.file)) urls.set(it.file, URL.createObjectURL(it.file));
+        return h('div', { class: 'card', 'data-id': it.uid },
+          h('div', { class: 'card__page' }, h('img', { class: 'thumb', src: urls.get(it.file), alt: '', style: { imageOrientation: 'from-image' } })),
+          h('div', { class: 'card__meta' }, h('strong', { title: it.name }, it.name), sizeLine(it)),
+          h('button', { class: 'iconbtn card__x', 'aria-label': `Remove ${it.name}`, onclick: () => { ctx.items.splice(ctx.items.indexOf(it), 1); draw(); refresh(); } }, icon('x')));
+      }), h('button', { class: 'card card--add', onclick: async () => add(await ctx.addMore()) }, icon('plus'), 'Add images'));
+      const ready = ctx.items.filter((it) => it.out && it.outKey === key());
+      const before = ready.reduce((n, it) => n + it.size, 0), after = ready.reduce((n, it) => n + it.out.blob.size, 0);
+      total.replaceChildren(ready.length < ctx.items.filter((it) => !it.err).length
+        ? `Working out the new sizes… ${ready.length} of ${ctx.items.length}`
+        : h('span', {}, h('strong', {}, `${fmtSize(before)} → ${fmtSize(after)}`), before > after ? ` · ${Math.round((1 - after / before) * 100)}% smaller` : ''));
+      ctx.action.disabled = !ctx.items.some((it) => !it.err);
+    };
+    // Compresses each picture in turn for the sizes on the cards; Compress then just hands them over.
+    const refresh = debounce(async () => {
+      const mine = ++gen, k = key();
+      for (const it of ctx.items) {
+        if (mine !== gen || !list.isConnected) return;
+        if (it.err || (it.out && it.outKey === k)) continue;
+        try { it.out = await shrinkImage(it.file, s); it.outKey = k; } catch (err) { it.err = err.message; }
+        if (mine === gen && list.isConnected) draw();
+      }
+    }, 300);
+    s.ensure = async () => {
+      const k = key();
+      for (const [n, it] of ctx.items.entries()) {
+        if (it.err || (it.out && it.outKey === k)) continue;
+        busy(`Compressing image ${n + 1} of ${ctx.items.length}…`);
+        try { it.out = await shrinkImage(it.file, s); it.outKey = k; } catch (err) { it.err = err.message; }
+      }
+    };
+    const add = (more) => {
+      const imgs = more.filter((it) => isImage(it.file));
+      if (imgs.length < more.length) toast('Videos are compressed one at a time, on their own. Only the images were added.');
+      ctx.items.push(...imgs); draw(); refresh();
+    };
+    ctx.onDropMore = add;
+    const change = (k) => (v) => { s[k] = v; draw(); refresh(); };
+    ctx.main.append(list);
+    ctx.side.append(
+      choiceCards([
+        ['small', 'Smallest file', 'Good for WhatsApp, email and websites'],
+        ['medium', 'Recommended', 'Good quality, good saving'],
+        ['high', 'High quality', 'Looks like the original, saves less'],
+      ], s.level, change('level')),
+      field('Largest side', segmented([[0, 'Original'], [3840, '3840 px'], [1920, '1920 px'], [1280, '1280 px']], s.max, change('max'))),
+      field('Save as', segmented([['auto', 'Best'], ['jpg', 'JPG'], ['webp', 'WebP']], s.format, change('format'))),
+      total,
+      h('p', { class: 'muted small' }, 'Best keeps JPG and WebP as they are and turns PNG into JPG, or WebP when it has see-through parts. Camera details and location are removed.'));
+    draw();
+    refresh();
+  },
+  async run(ctx) {
+    const s = ctx.state;
+    await s.ensure();
+    const done = ctx.items.filter((it) => it.out && !it.err);
+    const failed = ctx.items.length - done.length;
+    if (!done.length) throw new Error(ctx.items.find((it) => it.err)?.err || 'These images could not be compressed.');
+    const files = await Promise.all(done.map(async (it) => ({
+      name: it.out.kept ? it.name : `${baseName(it.name)}-compressed.${EXT[it.out.type] || 'jpg'}`,
+      bytes: new Uint8Array(await it.out.blob.arrayBuffer()), type: it.out.type,
+    })));
+    const before = done.reduce((n, it) => n + it.size, 0), after = files.reduce((n, f) => n + f.bytes.byteLength, 0);
+    const pct = Math.round((1 - after / before) * 100);
+    const one = files.length === 1;
+    return {
+      files, zipName: 'compressed-images.zip',
+      title: pct > 0 ? `Your ${one ? 'image is' : 'images are'} ${pct}% smaller` : `${one ? 'This image is' : 'These images are'} already compact`,
+      note: [`${fmtSize(before)} → ${fmtSize(after)}`, failed && `${failed} could not be read`].filter(Boolean).join(' · '),
+    };
+  },
+};
+
+/* ---------- the page: one video, or any number of images ---------- */
+
+const compressVideo = {
+  id: 'compress-video', keywords: 'video mp4 mov movie clip image photo picture jpg png webp reduce shrink size smaller whatsapp email compress-image', title: 'Compress video & images', icon: 'video', color: '#e11d48', cat: 'optimize',
+  accept: { accept: 'video/*,.mp4,.m4v,.mov,.webm,.mkv,.3gp,image/*,.heic,.heif', test: (f) => isVideo(f) || isImage(f), label: 'video or images' },
+  multiple: true, action: 'Compress', busyText: 'Getting ready…',
+  desc: 'Make videos and photos smaller to send or share.',
+  long: 'Shrink a video (MP4, MOV, WebM) into a smaller MP4, or many photos (JPG, PNG, WebP) at once. Pick how small, and a lower size for a bigger saving.',
+  setup(ctx) {
+    const vids = ctx.items.filter((it) => isVideo(it.file));
+    if (vids.length) {
+      if (ctx.items.length > 1) toast(`One video at a time: compressing “${vids[0].name}”.`);
+      ctx.items.splice(0, ctx.items.length, vids[0]);
+    }
+    ctx.mode = vids.length ? videoMode : imageMode;
+    ctx.action.firstChild.nodeValue = vids.length ? 'Compress video' : ctx.items.length > 1 ? 'Compress images' : 'Compress image';
+    ctx.mode.setup(ctx);
+  },
+  run: (ctx) => ctx.mode.run(ctx),
 };
 
 export const VIDEO = [compressVideo];

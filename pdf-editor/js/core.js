@@ -476,7 +476,7 @@ export async function imageDoc(file, size = 'a4') {
   return Object.assign(doc, { name: file.name, size: file.size, image: file });
 }
 
-function hasAlpha(ctx, w, h) {
+export function hasAlpha(ctx, w, h) {
   const step = Math.max(1, Math.floor((w * h) / 40000));
   const d = ctx.getImageData(0, 0, w, h).data;
   for (let i = 3; i < d.length; i += 4 * step) if (d[i] < 250) return true;
