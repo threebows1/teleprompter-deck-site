@@ -14,6 +14,7 @@ import { TO_PDF } from './more/to-pdf.js';
 import { FROM_PDF } from './more/from-pdf.js';
 import { SMART } from './more/smart.js';
 import { VIDEO } from './more/video.js';
+import { ENHANCE } from './more/enhance.js';
 
 export const CATEGORIES = [['organize', 'Organize'], ['optimize', 'Optimize'], ['convert', 'Convert'], ['edit', 'Edit'], ['security', 'Security'], ['ai', 'Intelligence'], ['workflows', 'Workflows']];
 
@@ -1037,7 +1038,7 @@ const ORDER = [
   'compress', 'compress-video', 'repair', 'ocr', 'image-to-text',
   'jpg-to-pdf', 'word-to-pdf', 'ppt-to-pdf', 'excel-to-pdf', 'html-to-pdf',
   'pdf-to-jpg', 'pdf-to-word', 'pdf-to-ppt', 'pdf-to-excel', 'pdf-to-pdfa', 'pdf-to-markdown',
-  'rotate', 'page-numbers', 'watermark', 'crop', 'edit', 'forms',
+  'rotate', 'page-numbers', 'watermark', 'crop', 'edit', 'enhance-image', 'forms',
   'unlock', 'protect', 'sign', 'redact', 'compare',
   'summarize', 'translate', 'workflow',
 ];
@@ -1045,5 +1046,5 @@ const rank = (t) => (ORDER.includes(t.id) ? ORDER.indexOf(t.id) : ORDER.length);
 export const TOOLS = [
   merge, split, organize, rotate, compress, jpgToPdf, pdfToJpg,
   editorTool('edit'), editorTool('sign'), watermark, pageNumbers, protect, unlock,
-  ...ORGANIZE_MORE, ...SECURITY_MORE, ...TO_PDF, ...FROM_PDF, ...SMART, ...VIDEO,
+  ...ORGANIZE_MORE, ...SECURITY_MORE, ...TO_PDF, ...FROM_PDF, ...SMART, ...VIDEO, ...ENHANCE,
 ].sort((a, b) => rank(a) - rank(b));

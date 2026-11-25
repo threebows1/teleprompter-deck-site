@@ -160,10 +160,10 @@ const extractPages = {
 // A box over `stage` (position: relative, wrapping the picture exactly).
 // rect is in fractions of the stage: { x, y, w, h }. Drag inside to move it,
 // or a corner or edge to resize. Pointer events, so touch works too.
-const FULL = { x: 0, y: 0, w: 1, h: 1 };
-const isFull = (r) => r.x < 0.002 && r.y < 0.002 && r.w > 0.996 && r.h > 0.996;
+export const FULL = { x: 0, y: 0, w: 1, h: 1 };
+export const isFull = (r) => r.x < 0.002 && r.y < 0.002 && r.w > 0.996 && r.h > 0.996;
 
-function cropper(stage, rect, onChange) {
+export function cropper(stage, rect, onChange) {
   const MIN = 0.05;
   const box = h('div', { class: 'crop__box', 'aria-label': 'Crop area' },
     ['n', 'e', 's', 'w', 'nw', 'ne', 'sw', 'se'].map((d) => h('span', { class: `crop__h crop__h--${d}`, 'data-d': d })));
@@ -568,7 +568,7 @@ function applyLook(c, look) {
 
 // Halves the picture until it is tiny, then stretches it back: a cheap,
 // wide blur that works in every browser.
-function blurred(c) {
+export function blurred(c) {
   let cur = c;
   while (Math.max(cur.width, cur.height) > 48) {
     const n = h('canvas', { width: Math.max(1, cur.width >> 1), height: Math.max(1, cur.height >> 1) });
@@ -583,10 +583,10 @@ function blurred(c) {
 }
 
 // Turns a crop box along with its picture, 90° either way.
-const turnRect = (r, by) => (by > 0 ? { x: 1 - r.y - r.h, y: r.x, w: r.h, h: r.w } : { x: r.y, y: 1 - r.x - r.w, w: r.h, h: r.w });
+export const turnRect = (r, by) => (by > 0 ? { x: 1 - r.y - r.h, y: r.x, w: r.h, h: r.w } : { x: r.y, y: 1 - r.x - r.w, w: r.h, h: r.w });
 
 // EXIF rotation applied, at most maxSide pixels.
-async function decode(file, maxSide) {
+export async function decode(file, maxSide) {
   const full = await createImageBitmap(file, { imageOrientation: 'from-image' });
   const k = Math.min(1, maxSide / Math.max(full.width, full.height));
   if (k === 1) return full;

@@ -339,6 +339,14 @@ select.field { appearance: auto; }
 .vid-est { margin: 4px 0 0; padding: 12px 14px; border-radius: 12px; background: var(--stage); line-height: 1.5; }
 .vid-bad { color: var(--bad); }
 .vid-size b { color: var(--text); }
+/* Enhance image */
+.enh-holder { display: grid; place-items: center; padding: 10px; border-radius: 16px; background: var(--stage); }
+.enh-stage canvas { max-height: 68vh; width: auto !important; }
+.enh-grid::after { content: ""; position: absolute; inset: 0; pointer-events: none; background-image: linear-gradient(rgba(255,255,255,.55) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.55) 1px, transparent 1px); background-size: 12.5% 12.5%; }
+.enh-hint { margin: 10px 0 0; text-align: center; }
+.enh-row { display: flex; gap: 8px; }
+.enh-row .btn:last-child { flex: 1; }
+.enh-auto.on { background: var(--primary); color: #fff; }
 
 .file-row { display: flex; align-items: center; gap: 12px; padding: 10px; border-radius: 14px; background: var(--surface-2); }
 .file-row__page { display: grid; place-items: center; width: 44px; height: 54px; flex: none; }
