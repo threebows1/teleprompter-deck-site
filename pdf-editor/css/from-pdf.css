@@ -1,0 +1,39 @@
+/* Styles for js/more/from-pdf.js: the PDF to Markdown preview. */
+.fp-md { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.fp-md__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.fp-md__bar .seg { flex: 0 1 260px; }
+.fp-md__tools { display: flex; align-items: center; gap: 14px; }
+.fp-md__tools .linkbtn { display: inline-flex; align-items: center; gap: 5px; }
+.fp-md__tools .linkbtn:disabled { color: var(--faint); cursor: default; text-decoration: none; }
+.fp-md__tools .ic { width: 15px; height: 15px; }
+.fp-md__stats { color: var(--faint); font-size: .86rem; font-variant-numeric: tabular-nums; }
+.fp-md__out { height: min(68vh, 760px); min-height: 320px; overflow: auto; border-radius: 16px; background: var(--surface-2); border: 1px solid var(--line); }
+.fp-md__wait { margin: 0; padding: 40px 24px; text-align: center; color: var(--muted); }
+
+/* Raw Markdown */
+.fp-md__raw { margin: 0; padding: 20px 22px; font: .84rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Rendered preview, a plain reading style */
+.fp-md__doc { padding: 22px 26px 30px; background: #fff; min-height: 100%; font-size: .95rem; line-height: 1.6; overflow-wrap: anywhere; }
+.fp-md__doc > :first-child { margin-top: 0; }
+.fp-md__doc h1, .fp-md__doc h2, .fp-md__doc h3 { margin: 1.3em 0 .5em; line-height: 1.25; letter-spacing: -.01em; }
+.fp-md__doc h1 { font-size: 1.6rem; padding-bottom: .3em; border-bottom: 1px solid var(--line); }
+.fp-md__doc h2 { font-size: 1.3rem; }
+.fp-md__doc h3 { font-size: 1.08rem; }
+.fp-md__doc p { margin: 0 0 .9em; }
+.fp-md__doc ul, .fp-md__doc ol { margin: 0 0 .9em; padding-left: 1.5em; }
+.fp-md__doc li + li { margin-top: .2em; }
+.fp-md__doc hr { margin: 1.6em 0; border: 0; border-top: 2px dashed var(--line-2); }
+.fp-md__table { margin: 0 0 1em; overflow-x: auto; }
+.fp-md__doc table { border-collapse: collapse; font-size: .88rem; font-variant-numeric: tabular-nums; }
+.fp-md__doc th, .fp-md__doc td { padding: 6px 12px; border: 1px solid var(--line-2); text-align: left; white-space: nowrap; }
+.fp-md__doc th { background: var(--surface-2); }
+.fp-md__doc .num { text-align: right; }
+
+@media (max-width: 600px) {
+  .fp-md__bar .seg { flex-basis: 100%; }
+  .fp-md__tools { width: 100%; justify-content: space-between; }
+  .fp-md__out { height: 60vh; height: 60svh; }
+  .fp-md__doc { padding: 16px 16px 24px; }
+  .fp-md__raw { padding: 16px; }
+}

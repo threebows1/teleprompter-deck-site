@@ -8,14 +8,24 @@ to be reachable at a public URL.
 | --- | --- | --- |
 | `teleprompter/` | Teleprompter Deck (Android) | privacy, terms, support, delete-account |
 | `dimlock/` | DimLock (Android, `com.mysecondwish.blackscreen`) | privacy, terms, support, delete-account |
+| `signvel/` | SignVel (Android, `com.mysecondwish.signvel`) | privacy, terms, support |
 | `responsive-lens/` | Responsive Lens (Chrome extension) | privacy, support |
+| `wa-sendervel/` | Wa SenderVel (Chrome extension) | privacy, support |
+| `abc-tracing/` | ABC Letter Tracing 123 (Android, for children) | privacy, terms |
+| `pdf-editor/` | PDF Tools (web app, runs in the browser) | the app itself, privacy |
 
 `style.css` is shared. Each app's pages set their own `--accent` colour.
-`app-ads.txt` at the root lists the AdMob publisher ID that DimLock uses.
+`app-ads.txt` at the root lists the AdMob publisher IDs: pub-3748438999340132 is the current account (SignVel); pub-6821159100234374 is the earlier, rejected account, kept until no app uses it.
 
 This repository is public **only** because GitHub Pages needs it to be on the
 free plan. It holds nothing but these pages — the apps' source lives in
 private repositories.
+
+## Do not edit `pdf-editor/` here
+
+It is copied from `site/` in the private `pdf-tools` repository by
+`tool/publish.sh` there, which replaces the whole folder. Changes made here
+are lost on the next publish.
 
 ## Do not edit `privacy-policy.html` here
 
