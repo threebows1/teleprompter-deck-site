@@ -10,6 +10,7 @@ import {
 } from './core.js';
 import { readPage, matchItems, dropOps, plan, invisibleShows } from './content.js';
 import { langPicker, ocrWorker } from './more/security.js';
+import { slider } from './ui.js';
 
 const FONTS = {
   Helvetica: { label: 'Sans (Helvetica)', css: 'Helvetica, Arial, sans-serif', std: ['Helvetica', 'HelveticaBold'], base: 0.947 },
@@ -25,7 +26,7 @@ const saveSigs = (list) => { try { localStorage.setItem(SIG_KEY, JSON.stringify(
 export function editorTool(mode) {
   const sign = mode === 'sign';
   return {
-    id: mode, cat: 'edit', wide: true, editor: true, keywords: sign ? 'signature esign initials date' : 'text change write image draw highlight whiteout',
+    id: mode, cat: 'edit', wide: true, editor: true, keywords: sign ? 'signature esign initials date' : 'text change write image draw eraser rubber highlight whiteout',
     title: sign ? 'Sign PDF' : 'Edit PDF',
     icon: sign ? 'sign' : 'edit',
     color: sign ? '#7c3aed' : '#6646e8',
@@ -34,7 +35,7 @@ export function editorTool(mode) {
     desc: sign ? 'Draw, type or upload your signature and place it on the page.' : 'Change, move or delete the text in a PDF, and add text, images and drawings.',
     long: sign
       ? 'Make your signature once, then click on the page to place it. Add the date or your name the same way.'
-      : 'Click any text in the PDF to change it, drag it to move it, or delete it. Add new text, images, your signature, drawings and highlights.',
+      : 'Click any text in the PDF to change it, drag it to move it, or delete it. Add new text, images, your signature, drawings and highlights, or rub things out with the soft eraser.',
     setup: (ctx) => setupEditor(ctx, sign),
     run: (ctx) => saveEditor(ctx),
   };
@@ -54,13 +55,14 @@ async function setupEditor(ctx, signMode) {
     pen: { color: '#1d4ed8', width: 2 },
     mark: { color: '#fde047' },
     white: { color: '#ffffff' },
+    rub: { color: '#ffffff', width: 16, opacity: 1, soft: 0.5 },
   };
   const els = new Map(); // object id -> element
 
   /* toolbar */
   const tools = signMode
     ? [['select', 'cursor', 'Select'], ['sign', 'sign', 'Signature'], ['text', 'text', 'Text'], ['date', 'numbers', 'Date'], ['image', 'image', 'Image']]
-    : [['edittext', 'edit', 'Edit text'], ['select', 'cursor', 'Select'], ['text', 'text', 'Add text'], ['sign', 'sign', 'Signature'], ['image', 'image', 'Image'], ['draw', 'pen', 'Draw'], ['highlight', 'highlight', 'Highlight'], ['whiteout', 'whiteout', 'White-out']];
+    : [['edittext', 'edit', 'Edit text'], ['select', 'cursor', 'Select'], ['text', 'text', 'Add text'], ['sign', 'sign', 'Signature'], ['image', 'image', 'Image'], ['draw', 'pen', 'Draw'], ['erase', 'eraser', 'Eraser'], ['highlight', 'highlight', 'Highlight'], ['whiteout', 'whiteout', 'White-out']];
   // Left rail of tools (a scrolling strip on phones).
   const rail = h('nav', { class: 'ed-rail', role: 'toolbar', 'aria-label': 'Editing tools' });
   const toolBtns = tools.map(([id, ic, label]) =>
@@ -215,6 +217,13 @@ async function setupEditor(ctx, signMode) {
     draw(value);
     return wrap;
   };
+  // A slider whose drag is one undo step, like the colour picker above.
+  const liveSlider = (min, max, step, value, fmt, onSet) => {
+    let live = false;
+    const el = slider(min, max, step, value, fmt, (v) => { onSet(v, live); live = true; });
+    el.querySelector('input').addEventListener('change', () => { live = false; });
+    return el;
+  };
   const INK = ['#111827', '#6646e8', '#14b8a6', '#f43f5e', '#2563eb', '#9ca3af'];
   const MARK = ['#fde047', '#86efac', '#93c5fd', '#f9a8d4', '#fdba74'];
   const PAPER = ['#ffffff', '#f8fafc', '#fef9c3', '#e5e7eb', '#000000'];
@@ -222,9 +231,18 @@ async function setupEditor(ctx, signMode) {
 
   function drawProps() {
     const o = st.selected && st.objects.find((x) => x.id === st.selected);
-    const type = o?.type || ({ text: 'text', date: 'text', draw: 'path', highlight: 'rect', whiteout: 'rect' })[st.tool];
+    const type = o?.type || ({ text: 'text', date: 'text', draw: 'path', erase: 'path', highlight: 'rect', whiteout: 'rect' })[st.tool];
     const kids = [];
-    if (type === 'text') {
+    if (type === 'path' && (o ? o.kind === 'erase' : st.tool === 'erase')) {
+      const t = o || st.rub;
+      const set = (k, v, quiet) => { st.rub[k] = v; if (o) { if (!quiet) snapshot(); o[k] = v; restyle(o); } };
+      kids.push(h('h3', { class: 'props__title' }, 'Eraser'),
+        field2('Size', liveSlider(4, 60, 1, t.width, (v) => `${v} pt`, (v, q) => set('width', v, q))),
+        field2('Strength', liveSlider(10, 100, 5, Math.round(t.opacity * 100), (v) => `${v}%`, (v, q) => set('opacity', v / 100, q))),
+        field2('Softness', liveSlider(0, 100, 5, Math.round(t.soft * 100), (v) => `${v}%`, (v, q) => set('soft', v / 100, q))),
+        field2('Paper color', swatches(t.color, PAPER, (c, quiet) => set('color', c, quiet))),
+        !o && h('p', { class: 'muted small' }, 'Rub over the page to paint it back to paper. Lower the strength to fade things out instead of hiding them, and raise the softness for a gentle edge.'));
+    } else if (type === 'text') {
       const t = o || st.text;
       const set = (k, v, quiet) => { if (o) { if (!quiet) snapshot(); o[k] = v; restyle(o); } st.text[k] = v; };
       const align = t.align || 'left';
@@ -650,7 +668,7 @@ async function setupEditor(ctx, signMode) {
     // and Delete removes it (see onKey).
     el.tabIndex = 0;
     el.setAttribute('role', 'button');
-    el.setAttribute('aria-label', o.type === 'text' ? `Text: ${o.text || 'empty'}` : o.kind === 'sig' ? 'Signature' : o.type === 'image' ? 'Image' : o.type === 'path' ? 'Drawing' : o.kind === 'highlight' ? 'Highlight' : 'White-out');
+    el.setAttribute('aria-label', o.type === 'text' ? `Text: ${o.text || 'empty'}` : o.kind === 'sig' ? 'Signature' : o.type === 'image' ? 'Image' : o.kind === 'erase' ? 'Eraser stroke' : o.type === 'path' ? 'Drawing' : o.kind === 'highlight' ? 'Highlight' : 'White-out');
     el.addEventListener('focus', () => { if (st.selected !== o.id && st.editing !== o.id) select(o.id); });
     el.addEventListener('keydown', (e) => {
       if (st.editing === o.id || e.key !== 'Enter' || o.type !== 'text') return;
@@ -673,6 +691,7 @@ async function setupEditor(ctx, signMode) {
     else if (o.type === 'path') {
       const pl = el.querySelector('polyline');
       pl.setAttribute('stroke', o.color);
+      if (o.kind === 'erase') pl.setAttribute('opacity', o.opacity);
     }
     place(o);
   }
@@ -695,6 +714,7 @@ async function setupEditor(ctx, signMode) {
       const pl = svgEl.querySelector('polyline');
       pl.setAttribute('points', o.pts.map(([nx, ny]) => `${nx * o.w * s},${ny * o.h * s}`).join(' '));
       pl.setAttribute('stroke-width', o.width * s);
+      if (o.kind === 'erase') svgEl.style.filter = o.soft ? `blur(${softBlur(o) * s}px)` : '';
     }
   }
   function select(id) {
@@ -850,11 +870,13 @@ async function setupEditor(ctx, signMode) {
       return;
     }
 
-    if (st.tool === 'draw') {
+    if (st.tool === 'draw' || st.tool === 'erase') {
       e.preventDefault();
+      const rub = st.tool === 'erase';
+      const look = rub ? { kind: 'erase', color: st.rub.color, width: st.rub.width, opacity: st.rub.opacity, soft: st.rub.soft } : { color: st.pen.color, width: st.pen.width };
       const pts = [[p.x, p.y]];
       const ghost = h('div', { class: 'obj obj--path live' });
-      ghost.innerHTML = `<svg style="position:absolute;inset:0;width:100%;height:100%;overflow:visible"><polyline fill="none" stroke="${st.pen.color}" stroke-width="${st.pen.width * st.scale}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+      ghost.innerHTML = `<svg style="position:absolute;inset:0;width:100%;height:100%;overflow:visible${rub && look.soft ? `;filter:blur(${softBlur(look) * st.scale}px)` : ''}"><polyline fill="none" stroke="${look.color}" stroke-width="${look.width * st.scale}" opacity="${look.opacity ?? 1}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
       Object.assign(ghost.style, { left: 0, top: 0, width: '100%', height: '100%' });
       layer.append(ghost);
       const pl = ghost.querySelector('polyline');
@@ -868,7 +890,7 @@ async function setupEditor(ctx, signMode) {
         const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
         const x = Math.min(...xs), y = Math.min(...ys);
         const w = Math.max(Math.max(...xs) - x, 0.5), hh = Math.max(Math.max(...ys) - y, 0.5);
-        add({ type: 'path', page, x, y, w, h: hh, color: st.pen.color, width: st.pen.width, pts: pts.map(([px, py]) => [(px - x) / w, (py - y) / hh]) });
+        add({ type: 'path', page, x, y, w, h: hh, ...look, pts:pts.map(([px, py]) => [(px - x) / w, (py - y) / hh]) });
       });
       return;
     }
@@ -1028,10 +1050,15 @@ async function saveEditor(ctx) {
       const a = boxAnchor(f, X + W / 2, Y + H / 2, W, H);
       const hl = o.kind === 'highlight';
       page.drawRectangle({ x: a.x, y: a.y, width: W, height: H, rotate: a.rotate, color: hexToRgb(o.color), opacity: hl ? 0.45 : 1, blendMode: hl ? BlendMode.Multiply : undefined });
+    } else if (o.type === 'path' && o.kind === 'erase' && o.soft) {
+      // A soft edge has no PDF equivalent: draw the blurred stroke as a picture.
+      const png = await strokeAsPng(o.pts.map(([nx, ny]) => [X + nx * W, Y + ny * H]), o);
+      const a = boxAnchor(f, png.x + png.width / 2, png.y + png.height / 2, png.width, png.height);
+      page.drawImage(await lib.embedPng(png.bytes), { x: a.x, y: a.y, width: png.width, height: png.height, rotate: a.rotate });
     } else if (o.type === 'path') {
       const pts = o.pts.map(([nx, ny]) => f.map(X + nx * W, Y + ny * H));
       const d = pts.map((q, k) => `${k ? 'L' : 'M'}${q.x.toFixed(2)} ${(-q.y).toFixed(2)}`).join(' ');
-      page.drawSvgPath(d, { x: 0, y: 0, borderColor: hexToRgb(o.color), borderWidth: o.width, borderLineCap: 1 });
+      page.drawSvgPath(d, { x: 0, y: 0, borderColor: hexToRgb(o.color), borderWidth: o.width, borderLineCap: 1, borderOpacity: o.opacity ?? 1 });
     } else if (o.type === 'text') {
       const fnt = await font(o.font, o.bold);
       const lines = o.text.split('\n');
@@ -1058,6 +1085,29 @@ async function saveEditor(ctx) {
     files: [{ name: `${baseName(st.doc.name)}-${signed ? 'signed' : 'edited'}.pdf`, bytes: await lib.save(), type: 'application/pdf' }],
     title: signed ? 'Your PDF is signed' : 'Your PDF is saved',
   };
+}
+
+// How far an eraser stroke's edge fades out, in points (CSS blur radius).
+const softBlur = (o) => o.width * o.soft * 0.35;
+
+// An eraser stroke as a PNG, blurred the same way it looks on screen. pts are
+// view points; returns the picture's box in view points too.
+async function strokeAsPng(pts, o) {
+  const k = 4; // pixels per point
+  const pad = o.width / 2 + softBlur(o) * 3;
+  const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+  const x = Math.min(...xs) - pad, y = Math.min(...ys) - pad;
+  const w = Math.max(...xs) + pad - x, hh = Math.max(...ys) + pad - y;
+  const c = h('canvas', { width: Math.ceil(w * k), height: Math.ceil(hh * k) });
+  const g = c.getContext('2d');
+  g.filter = `blur(${softBlur(o) * k}px)`;
+  Object.assign(g, { strokeStyle: o.color, lineWidth: o.width * k, lineCap: 'round', lineJoin: 'round', globalAlpha: o.opacity });
+  g.beginPath();
+  pts.forEach(([px, py], i) => g[i ? 'lineTo' : 'moveTo']((px - x) * k, (py - y) * k));
+  if (pts.length === 1) g.lineTo((pts[0][0] - x) * k + 0.1, (pts[0][1] - y) * k);
+  g.stroke();
+  const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), x, y, width: c.width / k, height: c.height / k };
 }
 
 /* ---------- signature maker ---------- */
